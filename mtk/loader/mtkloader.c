@@ -66,9 +66,9 @@
 #ifndef XNU_RETURN_WDT
 #define XNU_RETURN_WDT      0
 #endif
-/* 1: after XNU comes back, each core's state as PSCI has it (AFFINITY_INFO: reads only), on screen and in the log, and
- * ten seconds to photograph it before Android: whether XNU's other cores were really switched off (cpus > 1). Then core 1
- * switched on again (PSCI CPU_ON, into a stub that switches it straight off: start.S, cpu_off_entry), as Linux will. */
+/* 1: after XNU comes back, each core's PSCI state (AFFINITY_INFO: reads only), on screen and in the log for ten
+ * seconds before Android: whether XNU's other cores were switched off (cpus > 1). Then core 1 switched on again (PSCI
+ * CPU_ON into start.S's cpu_off_entry, which switches it straight off), as Linux will. */
 #ifndef RETURN_CPUS
 #define RETURN_CPUS         0
 #endif
@@ -90,7 +90,7 @@
 /* 1 (MT6781, with XNU_PARK's device-tree helpers): before XNU, the CPU clocks as they are -- each cluster's PLL and
  * divider, the operating-point tables in LK's device tree (dvfsp@0011bc00), and the start of the CPU DVFS SRAM shared
  * with SSPM ("CSRAM"), LK's tables checked against it (table_check); and, before XNU and again at the hand-back, what
- * of SSPM changes meanwhile (sspm_watch) and the CPU temperature (lvts_show; lvts_golden= for the kernel). Only read. */
+ * of SSPM changes meanwhile (sspm_watch) and the CPU temperature (lvts_show; mp_lvts_golden= for the kernel). Only read. */
 #ifndef DVFS_PROBE
 #define DVFS_PROBE          0
 #endif
@@ -125,7 +125,7 @@
 #ifndef XNU_LOG_CONSOLE
 #define XNU_LOG_CONSOLE     0
 #endif
-#define PARK_NODE           "hakios-pen@4cdff000"
+#define PARK_NODE           "mapple-pen@4cdff000"
 #define PARK_NODE_BYTES     68      /* begin, the name (20), reg (12 + 16), no-map (12), end */
 /*
  * How many processors the device tree offers the kernel. It takes them from the head of
@@ -235,7 +235,7 @@ static void xnu_ufs_args(char *cl);
 #ifndef SOC_PROBE
 #define SOC_PROBE           0
 #endif
-/* 1 (with PASS_THROUGH): once, when Android asks (printf DARWIN-REDWOOD:MARKER-TEST > /dev/pmsg0; reboot), put a
+/* 1 (with PASS_THROUGH): once, when Android asks (printf OPENMAPPLE:MARKER-TEST > /dev/pmsg0; reboot), put a
  * pattern in the marker and reset the board; the next boot says if it survived. How: 1 the watchdog as run_xnu
  * arms it, 2 PSCI SYSTEM_RESET, 3 the watchdog with DDR reserve on (MT6781: TOPRGU MODE bit 7). */
 #ifndef MARKER_TEST
@@ -255,25 +255,25 @@ static void xnu_ufs_args(char *cl);
 /* More for the kernel's command line: cores, the clock (epoch=), whatever a run wants to try. */
 /* The serial number iOS is told (the device tree's serial-number): a placeholder, not any real device's. */
 #ifndef XNU_SERIAL
-#define XNU_SERIAL          "HAKIOS0000000000"
+#define XNU_SERIAL          "MAPPLE0000000000"
 #endif
 #ifndef XNU_EXTRA_ARGS
 #define XNU_EXTRA_ARGS      "cpus=1"
 #endif
 /*
  * 1: the system image stays on the eMMC and the kernel reads it as it needs it (emmc_root=1,
- * bsd/dev/redwood_emmc.c), the default; 0: it is read into DRAM here as md0 -- 2.4 GB of the kernel's 4 GB,
+ * bsd/dev/mapple_emmc.c), the default; 0: it is read into DRAM here as md0 -- 2.4 GB of the kernel's 4 GB,
  * wired from the start, and three and a half minutes of every boot (run 320).
  */
 #ifndef XNU_ROOT_EMMC
 #if SOC_IS_MT6781
-#define XNU_ROOT_EMMC       0       /* no eMMC (UFS, not in yet): the root is the payload's RAM disk */
+#define XNU_ROOT_EMMC       0       /* no eMMC: the root is the payload's RAM disk */
 #else
 #define XNU_ROOT_EMMC       1
 #endif
 #endif
 /* 1 (MT6781, with XNU_UFS): the same on the UFS -- the system image in xnusys, read by the kernel (mtkufs_root=1,
- * mtk/mt6781/drivers/storage/hakios.mt6781_ufs.c); the payload's RAM disk stays md1. */
+ * mtk/mt6781/drivers/storage/mapple.mt6781_ufs.c); the payload's RAM disk stays md1. */
 #ifndef XNU_ROOT_UFS
 #define XNU_ROOT_UFS        0
 #endif
@@ -381,7 +381,7 @@ struct payload_info {
 	uint32_t kernel_size;
 	const uint8_t *ramdisk;
 	uint32_t ramdisk_size;
-	const char *kernel_version;     /* kernel.ver (xnuloader/mkpayload.py): the kernel gets it as hakios_kver= */
+	const char *kernel_version;     /* kernel.ver (xnuloader/mkpayload.py): the kernel gets it as mapple_kver= */
 };
 
 /* The XNU symbols the loader works with (kernel virtual addresses, 0 if absent). */
@@ -657,9 +657,9 @@ static void find_syms(const uint8_t *kernel, struct xnu_syms *s)
 		"_vmapple_uart_receive_ready", "_uart_putc", "_uart_putc_options", "_loader_log_putc",
 		"_nprocs", "_tasks_count", "_initproc", "_gic_v3_irq_cpu_init",
 		"_gic_unhandled_count", "_gic_last_unhandled", "_gic_active_iar",
-		"_redwood_host_keep", "_redwood_host_keep_len", "_redwood_host_keep_dropped",
+		"_mapple_host_keep", "_mapple_host_keep_len", "_mapple_host_keep_dropped",
 		/* (the same in a kernel of the common tree, hakios-xnu-kernel's mtk/mt6768/drivers/gpu/hakios.mali.c) */
-		"_hakios_host_keep", "_hakios_host_keep_len", "_hakios_host_keep_dropped",
+		"_mapple_host_keep", "_mapple_host_keep_len", "_mapple_host_keep_dropped",
 	};
 	_Static_assert(sizeof(struct xnu_syms) == sizeof(names), "every field needs its name, in order");
 	uint64_t *slots = (uint64_t *)s;
@@ -1227,7 +1227,7 @@ static void save_c(struct save_at *s, char c)
 		if (s->at == s->head && s->head < s->skip_to) {
 			dbg_puts("\n\n[... ");
 			dbg_dec(s->skip_to - s->head);
-			dbg_puts(XNU_LOG_KEEP ? " bytes of the XNU log left out here, but for lines with \"hakios: input\", \"backboardd[\", "
+			dbg_puts(XNU_LOG_KEEP ? " bytes of the XNU log left out here, but for lines with \"mapple: input\", \"backboardd[\", "
 			    "\"still waiting\", \"SpringBoard[\" or ps -A's ...]\n\n" :
 			    " bytes of the XNU log left out here ...]\n\n");
 		}
@@ -1239,7 +1239,7 @@ static void save_c(struct save_at *s, char c)
 }
 
 #if XNU_LOG_KEEP
-static const char *const keep_words[] = { "hakios: input", "backboardd[", "still waiting", "SpringBoard[", "PID TTY",
+static const char *const keep_words[] = { "mapple: input", "backboardd[", "still waiting", "SpringBoard[", "PID TTY",
 	" ?? " };   /* the last two: ps -A */
 
 /* whether [from, to) has one of keep_words in it */
@@ -1392,7 +1392,7 @@ static void plog_grow(uint64_t dtb)
 #endif
 
 /*
- * The kernel's lines for the host (kern.redwood.host_keep, bsd/dev/redwood_mali.c) into ramoops' pmsg
+ * The kernel's lines for the host (kern.mapple_host_keep, bsd/dev/mapple_mali.c) into ramoops' pmsg
  * zone, whole: Android shows them as /sys/fs/pstore/pmsg-ramoops-0, and tools/xnu-cycle.sh appends them
  * to the run's log. Called on each way back from XNU, after the boot request in that zone was taken.
  */
@@ -2201,13 +2201,13 @@ static void sspm_watch(const char *when)
  * the low byte of the chip's efuse word 112, which LK gives Linux in /chosen "atag,devinfo" (a count, then the words
  * get_devinfo_with_index() reads). They count only once SSPM runs them (Linux asks it to); otherwise they read 0 or
  * stand still. Their clock is infra_therm (infracfg_ao +0x90 bit 10 set: gated); while it is off they are not read.
- * lvts_args passes golden to the kernel's reader (hakios.mt6781_lvts.c).
+ * lvts_args passes golden to the kernel's reader (mapple.mt6781_lvts.c).
  */
 #define LVTS_BASE           0x1100b000ULL
 #define INFRA_CG0_STA       0x10001090ULL
 #define INFRA_THERM_CG      (1u << 10)
 
-static uint32_t lvts_golden;                    /* 0: not known */
+static uint32_t mp_lvts_golden;                    /* 0: not known */
 
 /* where a property of a node just below the root of LK's tree is, or 0 */
 static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32_t *len)
@@ -2256,8 +2256,8 @@ static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32
 	return 0;
 }
 
-/* " lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
- * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " lvts_r=r<hex>.<hex>..."
+/* " mp_lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
+ * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " mp_lvts_r=r<hex>.<hex>..."
  * (a string: a number would not hold nine): the nine sensors' calibration counts (count_r, bits 23..0 of efuse words
  * 118, 119, 190..196, in MediaTek's sensor order), for the kernel's calibration step. */
 static void lvts_args(char *cl)
@@ -2267,7 +2267,7 @@ static void lvts_args(char *cl)
 	char *at = cl;
 
 	if (info == 0 || len < 4 * 114) {
-		out("lvts: no atag,devinfo in LK's tree (or too short): no golden value, no lvts_golden\n");
+		out("lvts: no atag,devinfo in LK's tree (or too short): no golden value, no mp_lvts_golden\n");
 		return;
 	}
 	out("lvts: LK's devinfo: ");
@@ -2278,37 +2278,37 @@ static void lvts_args(char *cl)
 	out_dec(rd32(info + 4 * 8) & 0xf);
 	out("; word 112 ");
 	out_hex(rd32(info + 4 * 113));
-	lvts_golden = rd32(info + 4 * 113) & 0xff;
+	mp_lvts_golden = rd32(info + 4 * 113) & 0xff;
 	out(", golden ");
-	out_dec(lvts_golden);
+	out_dec(mp_lvts_golden);
 	out("\n");
-	if (lvts_golden == 0) {
+	if (mp_lvts_golden == 0) {
 		return;
 	}
 	while (*at) {
 		at++;
 	}
 	if ((uint32_t)(at - cl) + 90 >= BOOT_LINE_LENGTH) {
-		out("lvts: no room on the command line; no lvts_golden, no lvts_r\n");
+		out("lvts: no room on the command line; no mp_lvts_golden, no mp_lvts_r\n");
 		return;
 	}
-	for (const char *s = " lvts_golden="; *s; s++) {
+	for (const char *s = " mp_lvts_golden="; *s; s++) {
 		*at++ = *s;
 	}
-	if (lvts_golden >= 100) {
-		*at++ = (char)('0' + lvts_golden / 100);
+	if (mp_lvts_golden >= 100) {
+		*at++ = (char)('0' + mp_lvts_golden / 100);
 	}
-	if (lvts_golden >= 10) {
-		*at++ = (char)('0' + lvts_golden / 10 % 10);
+	if (mp_lvts_golden >= 10) {
+		*at++ = (char)('0' + mp_lvts_golden / 10 % 10);
 	}
-	*at++ = (char)('0' + lvts_golden % 10);
+	*at++ = (char)('0' + mp_lvts_golden % 10);
 	*at = 0;
 	if (len < 4 * 198) {
-		out("lvts: devinfo too short for the calibration counts: no lvts_r\n");
+		out("lvts: devinfo too short for the calibration counts: no mp_lvts_r\n");
 		return;
 	}
 	out("lvts: count_r:");
-	for (const char *s = " lvts_r=r"; *s; s++) {
+	for (const char *s = " mp_lvts_r=r"; *s; s++) {
 		*at++ = *s;
 	}
 	for (uint32_t i = 0; i < 9; i++) {
@@ -2335,17 +2335,17 @@ static void lvts_args(char *cl)
 
 /*
  * For the kernel's MT6781_DVFS: LK's three operating-point tables (dvfsp@0011bc00's L-table, B-table, CCI-table: 16
- * rows of MHz, voltage step, post divider, clock divider each), copied here as they are and " dvfs_tbl=<address>" on
- * the command line (the loader stays in memory under XNU, its addresses physical, as ili_fw=). Nothing if a table is
+ * rows of MHz, voltage step, post divider, clock divider each), copied here as they are and " mp_dvfs_tbl=<address>" on
+ * the command line (the loader stays in memory under XNU, its addresses physical, as mp_ili_fw=). Nothing if a table is
  * missing or not 64 cells.
  */
-static uint32_t dvfs_tbl[3 * 64];
+static uint32_t mp_dvfs_tbl[3 * 64];
 
 static void dvfs_args(char *cl)
 {
 	static const char *const names[3] = { "L-table", "B-table", "CCI-table" };
-	static const char key[] = " dvfs_tbl=";
-	uint64_t v = (uint64_t)(uintptr_t)dvfs_tbl;
+	static const char key[] = " mp_dvfs_tbl=";
+	uint64_t v = (uint64_t)(uintptr_t)mp_dvfs_tbl;
 	char d[24];
 	uint32_t at = 0, n = 0;
 
@@ -2356,11 +2356,11 @@ static void dvfs_args(char *cl)
 		if (cells == 0 || len != 64 * 4) {
 			out("dvfs: LK's ");
 			out(names[t]);
-			out(" missing or not 64 cells: no dvfs_tbl\n");
+			out(" missing or not 64 cells: no mp_dvfs_tbl\n");
 			return;
 		}
 		for (uint32_t w = 0; w < 64; w++) {
-			dvfs_tbl[64 * t + w] = fdt_get(cells + 4 * w);
+			mp_dvfs_tbl[64 * t + w] = fdt_get(cells + 4 * w);
 		}
 	}
 	while (cl[at]) {
@@ -2371,7 +2371,7 @@ static void dvfs_args(char *cl)
 		v /= 10;
 	} while (v);
 	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
-		out("dvfs: no room on the command line for dvfs_tbl=\n");
+		out("dvfs: no room on the command line for mp_dvfs_tbl=\n");
 		return;
 	}
 	for (uint32_t i = 0; key[i]; i++) {
@@ -2382,7 +2382,7 @@ static void dvfs_args(char *cl)
 	}
 	cl[at] = 0;
 	out("dvfs: LK's tables for the kernel at ");
-	out_hex((uint64_t)(uintptr_t)dvfs_tbl);
+	out_hex((uint64_t)(uintptr_t)mp_dvfs_tbl);
 	out("\n");
 }
 
@@ -2412,11 +2412,11 @@ static void lvts_show(const char *when)
 		out_hex(rd32(base + 0x50));
 		for (uint32_t n = 0; n < sensors[c]; n++) {
 			uint32_t raw = rd32(base + 0x90 + 4 * n);
-			int64_t mc = ((-204650LL * (raw & 0xffff)) >> 14) + 500LL * lvts_golden + 204650;
+			int64_t mc = ((-204650LL * (raw & 0xffff)) >> 14) + 500LL * mp_lvts_golden + 204650;
 
 			out(n ? "; " : ": ");
 			out_hex(raw);
-			if ((raw & 0xffff) == 0 || lvts_golden == 0) {
+			if ((raw & 0xffff) == 0 || mp_lvts_golden == 0) {
 				continue;
 			}
 			out(" = ");
@@ -2704,7 +2704,7 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 				out_dec(core_order[i]);
 				out("'s redistributor NOT FOUND by its affinity");
 				if (i == 0) {
-					/* the first frame, as before this looked them up: core 0's */
+					/* the first frame: core 0's */
 					wr32(0x0c050000ULL + 0x180, 0xffffffffu);
 					wr32(0x0c050000ULL + 0x280, 0xffffffffu);
 					wr32(0x0c050000ULL + 0x380, 0xffffffffu);
@@ -3583,9 +3583,9 @@ static void __attribute__((noreturn)) run_xnu(void)
 	ba->video.v_height = PANEL_H;
 	ba->video.v_depth = 32;
 	memcpy(ba->commandLine, XNU_BOOT_ARGS, sizeof(XNU_BOOT_ARGS));
-	/* the kernel's version, for sysctl kern.hakios.version and its log, as xnuloader gives it (one word) */
+	/* the kernel's version, for sysctl kern.mapple.version and its log, as xnuloader gives it (one word) */
 	if (pi.kernel_version != NULL) {
-		static const char prefix[] = " hakios_kver=";
+		static const char prefix[] = " mapple_kver=";
 		uint32_t n = sizeof(XNU_BOOT_ARGS) - 1, len = 0;
 
 		while (pi.kernel_version[len] != 0 && pi.kernel_version[len] != ' ' && len < 128) {
@@ -4298,7 +4298,7 @@ static void touch_hand_back(void)
  * (tools/boot-xnu.sh): ramoops keeps it in its pmsg zone across the reboot, where this finds it
  * and wipes it, so the boot after XNU is Android again.
  */
-static const char boot_xnu_flag[] = "DARWIN-REDWOOD:BOOT-XNU";
+static const char boot_xnu_flag[] = "OPENMAPPLE:BOOT-XNU";
 
 /*
  * Whether Android left `flag` in the pmsg zone before rebooting, and if so wipe it, so it is taken
@@ -4389,7 +4389,7 @@ static int boot_choice(void)
 #include "mtkpwrap.h"
 #include "mtkmali.h"
 
-static const char gpu_probe_flag[] = "DARWIN-REDWOOD:GPU-PROBE";
+static const char gpu_probe_flag[] = "OPENMAPPLE:GPU-PROBE";
 
 static void say_mv(const char *name, int on, uint16_t selector)
 {
@@ -4780,7 +4780,7 @@ static void soc_probe(void)
 /* TOPRGU MODE (vendor mtk_wdt/dbgtop): EN bit 0, EXRST_EN bit 2 (PMIC reset), IRQ_EN bit 3, DUAL_EN bit 6, and
  * on MT6781, where the device tree has no dbgtop, DDR_RESERVE bit 7 */
 #define MARK_TEST_MODE      (MARKER_TEST == 3 ? 0x81u : 0x1u)
-static const char marker_test_flag[] = "DARWIN-REDWOOD:MARKER-TEST";
+static const char marker_test_flag[] = "OPENMAPPLE:MARKER-TEST";
 
 static void marker_test(void)
 {
@@ -4833,7 +4833,7 @@ static void marker_test(void)
 #if CAM_PROBE
 #include "mtkcam.h"
 
-static const char cam_probe_flag[] = "DARWIN-REDWOOD:CAM-PROBE";
+static const char cam_probe_flag[] = "OPENMAPPLE:CAM-PROBE";
 #endif /* CAM_PROBE */
 
 #if KEY_PROBE
@@ -5002,8 +5002,7 @@ static int ufs_lk_read(uint64_t utrl, uint32_t lba, uint32_t n)
 	utrd[3] = 0;
 	utrd[4] = (uint32_t)(uint64_t)ufs_ucd;
 	utrd[5] = (uint32_t)((uint64_t)ufs_ucd >> 32);
-	/* DW6: response UPIU length (15:0) and offset (31:16); DW7: PRDT length (15:0) and offset (31:16), in dwords.
-	 * (The other way round, the first run's "256 entries at offset 1" got OCS 0x1, invalid command table.) */
+	/* DW6: response UPIU length (15:0) and offset (31:16); DW7: PRDT length (15:0) and offset (31:16), in dwords */
 	utrd[6] = (128u << 16) | 128u;    /* response UPIU at 512, 512 bytes long */
 	utrd[7] = (256u << 16) | 1u;      /* PRDT at 1024, one entry */
 	__asm__ volatile("dsb sy" ::: "memory");
@@ -5133,7 +5132,7 @@ static void ufs_gpt_find(const char *name, uint32_t count, uint32_t size, uint64
 
 /*
  * xnusys, found in the user unit's GPT (header at LBA 1, its entries after), for the kernel's UFS driver
- * (mtk/mt6781/drivers/storage/hakios.mt6781_ufs.c): " mtkufs_lba=<first block> mtkufs_blocks=<count>
+ * (mtk/mt6781/drivers/storage/mapple.mt6781_ufs.c): " mtkufs_lba=<first block> mtkufs_blocks=<count>
  * mtkufs_lkutrl=<LK's list>" onto the command line. When anything is not as expected nothing is added, and the
  * driver then leaves the controller alone. darwin as well, if it is there and clear of xnusys: " mtkufs_dlba=
  * mtkufs_dblocks=" (the driver opens it only with mtkufs_write=1, and checks it against the GPT itself).

@@ -1,7 +1,7 @@
 /*
  * The realme 8i's touch controller: the touch half of the ILI7807S (display and touch in one chip,
  * no flash of its own), on SPI4 of the MT6781. ILI_PROBE=1: what LK leaves, then one read with
- * nothing written, then the chip's ID through ICE mode with its MCU left running. Then Android.
+ * nothing written, then the chip's ID through ICE mode with its MCU left running.
  *
  * Addresses from the phone's device tree and MediaTek's MT6781 tables (pinctrl-mtk-mt6781.h,
  * clk-mt6781.c); the chip's SPI framing from the ILITEK driver Android runs (ili9882n), read, not
@@ -15,8 +15,8 @@
  * 10 ms, as the end of Android's reset pulse) before the reads; without it the chip cannot answer.
  *
  * SPI4's four pins are driven by hand (ili_bb_*), mode 0, MSB first, as the Hot 20's firmware goes out: SPI4's
- * controller did not finish transfers reliably here -- on the crystal, in Linux's pause mode after six FIFO-loads,
- * after its pins had been GPIOs, and once even on a short single read on the way to XNU (STATUS1 busy each time).
+ * controller does not finish transfers reliably (STATUS1 stays busy) -- on the crystal, in Linux's pause mode after
+ * six FIFO loads, after its pins have been GPIOs, even on a short single read.
  */
 #ifndef MTKILI_H
 #define MTKILI_H
@@ -228,13 +228,9 @@ static int ili_probe(void)
  * on every display resume, without its reset pulse: SPI PLL wake (nine 0xA3), ICE mode with the MCU stopped
  * (0x25), the blocks AP, DATA and TUNING written at their addresses, each one's CRC computed by the chip's DMA and
  * read back from its last four bytes and compared with the file's, the code reset (0xAE to 0x40040), ICE mode left,
- * then the firmware version asked for, and five seconds of reports. ilifw.h is made from YOUR phone's firmware file
- * (mtk/tools/mkilifw.py) and never committed.
- *
- * All of it goes out with the four pins driven by hand (ili_bb_*), mode 0, as the Hot 20's firmware does: the
- * controller in Linux's pause mode (chip select held across FIFO-loads) hung after six of them, and after the pins
- * had been GPIOs it hung on the next transfer at all (STATUS1 busy both times), as the Hot 20's SPI2 would not
- * finish twice in a row either (mtkspi.h).
+ * then the firmware version asked for, and report_ms of reports. ilifw.h is made from YOUR phone's firmware file
+ * (mtk/tools/mkilifw.py) and never committed. All of it with the pins driven by hand, as above (the Hot 20's SPI2
+ * would not finish twice in a row either: mtkspi.h).
  */
 #include "ilifw.h"
 #if !ILI_RELEASE_RST
@@ -428,7 +424,7 @@ static void ili_download(uint32_t report_ms)
 		out("ili: 2. no firmware answer\n");
 	}
 
-	/* five seconds of reports: each one read when the INT line falls */
+	/* reports, each one read when the INT line falls */
 	if (report_ms) {
 		out("ili: 2. touch the screen now: reports for ");
 		out_dec(report_ms / 1000);
@@ -468,13 +464,13 @@ static void ili_download(uint32_t report_ms)
 
 /*
  * For the kernel's MT6781_ILI, which sends the firmware again when the chip has lost it (as Android's driver does at
- * every display resume): where this loader's copy is, " ili_fw=<address of ili_blocks>" on the command line. The
+ * every display resume): where this loader's copy is, " mp_ili_fw=<address of ili_blocks>" on the command line. The
  * loader stays in memory under XNU (it is where XNU returns to), and with the MMU off its addresses are physical.
  */
 #if XNU_TOUCH_ILI
 static void ili_xnu_args(char *cl)
 {
-	static const char key[] = " ili_fw=";
+	static const char key[] = " mp_ili_fw=";
 	uint64_t v = (uint64_t)(uintptr_t)ili_blocks;
 	char d[24];
 	uint32_t at = 0, n = 0;
@@ -487,7 +483,7 @@ static void ili_xnu_args(char *cl)
 		v /= 10;
 	} while (v);
 	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
-		out("ili: no room on the command line for ili_fw=\n");
+		out("ili: no room on the command line for mp_ili_fw=\n");
 		return;
 	}
 	for (uint32_t i = 0; key[i]; i++) {

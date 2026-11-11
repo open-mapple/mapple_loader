@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#ifdef VIVA
+#ifdef MT6781_SHIM
 #define FB_BASE		0x7bc10000UL	/* LK atag,videolfb fb_base (measured) */
 #define FB_W		1080
 #define FB_H		2400

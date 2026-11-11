@@ -1,0 +1,8 @@
+Open Mapple: the boot loaders. MIT (LICENSE).
+
+- mtk/loader/: mtkloader, from HakiOS (github.com/oosexgang/hakios-xnu-kernel). MIT, Copyright (c) 2025-2026
+  the HakiOS authors.
+- shim/: viva's boot shim, from ios-viva (github.com/Nik300/ios-viva). MIT, Copyright (c) 2026 dipa-studio.
+
+Not in this repository: the identity header (made from the user's IPSW when building) and the touch firmware
+(pulled from the user's own phone).

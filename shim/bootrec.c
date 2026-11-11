@@ -1,9 +1,9 @@
 /*
- * viva: the VIVABOOT record (vivaboot.h) read from the root partition before XNU, so the boot-args Viva Manager saves
- * (kern.viva_nextbootargs) apply on the next boot although LK write-protects boot_b while iOS runs.
+ * Open Mapple: the MAPPLEBR record (bootrec.h) read from the root partition before XNU, so the boot-args Mapple saves
+ * (kern.mapple_nextbootargs) apply on the next boot although LK write-protects boot_b while iOS runs.
  *
  * READ-ONLY UFS access: there is no SCSI WRITE in this file. LK leaves the MediaTek UFS host (ufshci@11270000) enabled
- * with the link up; like the kernel's sweet_ufs.c, this points the transfer request list at its own memory (checking
+ * with the link up; like the kernel's mtk_ufs.c, this points the transfer request list at its own memory (checking
  * the host took it before ringing a doorbell), issues polled READ(10)s on the root's LUN, and gives the host its list
  * back. MMU off: memory is Device, DMA needs no cache maintenance, every access is aligned.
  *
@@ -12,7 +12,7 @@
  */
 #include <stdint.h>
 #include "console.h"
-#include "vivaboot.h"
+#include "bootrec.h"
 
 #define UFS_BASE	0x11270000UL	/* ufshci@11270000 (viva DTB, VIVA.md) */
 
@@ -49,7 +49,7 @@ struct ucd {
 static struct utrd utrl[32] __attribute__((aligned(1024)));
 static struct ucd ucd __attribute__((aligned(128)));
 static uint8_t bounce[BOUNCE] __attribute__((aligned(BLOCK)));
-static char line[VIVABOOT_LINE];
+static char line[BOOTREC_LINE];
 static uint8_t lun, tag;
 
 static inline uint32_t ufs_rd(uint32_t off) { return *(volatile uint32_t *)(UFS_BASE + off); }
@@ -129,7 +129,7 @@ static int ufs_read(uint64_t lba, uint32_t count)
 /* Value of key=... in a command line (first match, up to a space), 0 when absent. */
 static int arg(const char *cmd, const char *key, char *out, int cap)
 {
-	for (int i = 0; i < VIVABOOT_LINE && cmd[i]; i++) {
+	for (int i = 0; i < BOOTREC_LINE && cmd[i]; i++) {
 		if (i && cmd[i - 1] != ' ')
 			continue;
 		int k = 0;
@@ -138,7 +138,7 @@ static int arg(const char *cmd, const char *key, char *out, int cap)
 		if (key[k] || cmd[i + k] != '=')
 			continue;
 		int n = 0;
-		for (int j = i + k + 1; j < VIVABOOT_LINE && cmd[j] && cmd[j] != ' ' && n < cap - 1; j++)
+		for (int j = i + k + 1; j < BOOTREC_LINE && cmd[j] && cmd[j] != ' ' && n < cap - 1; j++)
 			out[n++] = cmd[j];
 		out[n] = 0;
 		return 1;
@@ -185,7 +185,7 @@ static int find_part(const char *name, uint64_t *first, uint64_t *count)
 			if (!same(nm, name))
 				continue;
 			uint64_t f = le(e + 32, 8), l = le(e + 40, 8);
-			if (l < f + VIVABOOT_TAIL_BLOCKS)
+			if (l < f + BOOTREC_TAIL_BLOCKS)
 				return -5;
 			*first = f;
 			*count = l - f + 1;
@@ -195,18 +195,18 @@ static int find_part(const char *name, uint64_t *first, uint64_t *count)
 	return -6;
 }
 
-const char *viva_bootfile(const char *payload)
+const char *mapple_bootfile(const char *payload)
 {
 	char v[16];
-	if (arg(payload, "vivabootfile", v, sizeof(v)) && v[0] == '0') {
-		con_str("BOOTFILE", "off (vivabootfile=0)");
+	if ((arg(payload, "mp_bootrec", v, sizeof(v)) || arg(payload, "vivabootfile", v, sizeof(v))) && v[0] == '0') {
+		con_str("BOOTFILE", "off (mp_bootrec=0)");
 		return payload;
 	}
 	lun = 2;
-	if (arg(payload, "ufslun", v, sizeof(v)) && v[0] >= '0' && v[0] <= '7' && !v[1])
+	if ((arg(payload, "mp_ufslun", v, sizeof(v)) || arg(payload, "ufslun", v, sizeof(v))) && v[0] >= '0' && v[0] <= '7' && !v[1])
 		lun = (uint8_t)(v[0] - '0');
 	char root[37];
-	if (!arg(payload, "ufsroot", root, sizeof(root))) {
+	if (!(arg(payload, "mp_ufsroot", root, sizeof(root)) || arg(payload, "ufsroot", root, sizeof(root)))) {
 		const char *d = "userdata";
 		int i = 0;
 		for (; d[i]; i++)
@@ -233,11 +233,11 @@ const char *viva_bootfile(const char *payload)
 		uint64_t first = 0, count = 0;
 		err = find_part(root, &first, &count);
 		if (!err)
-			err = ufs_read(first + count - VIVABOOT_TAIL_BLOCKS, 1) ? -20 : 0;
+			err = ufs_read(first + count - BOOTREC_TAIL_BLOCKS, 1) ? -20 : 0;
 		if (!err) {
-			const struct vivaboot_rec *rec = (const struct vivaboot_rec *)bounce;
-			if (vivaboot_valid(rec, vivaboot_hash(payload, VIVABOOT_LINE))) {
-				for (int i = 0; i < VIVABOOT_LINE; i++)
+			const struct bootrec_rec *rec = (const struct bootrec_rec *)bounce;
+			if (bootrec_valid(rec, bootrec_hash(payload, BOOTREC_LINE))) {
+				for (int i = 0; i < BOOTREC_LINE; i++)
 					line[i] = rec->cmdline[i];
 				out = line;
 			} else {
@@ -250,7 +250,7 @@ const char *viva_bootfile(const char *payload)
 	ufs_wr(REG_UTRLBAU, lba_hi);
 	ufs_wr(REG_UTRLRSR, rsr);
 	if (out == line)
-		con_str("BOOTFILE", "boot-args from userdata (VIVABOOT)");
+		con_str("BOOTFILE", "boot-args from userdata (MAPPLEBR)");
 	else if (err == 1)
 		con_str("BOOTFILE", "none: boot-args from the payload");
 	else

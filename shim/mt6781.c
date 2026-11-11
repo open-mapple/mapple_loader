@@ -2,7 +2,7 @@
  * viva (Redmi Note 11 Pro 4G, MT6781) boot shim: LK boots this as a gzip arm64
  * Image at EL1, MMU off, x0 = DTB. It stops the MediaTek watchdog, checks that
  * LK's framebuffer is where the kernel's early console expects it, and hands
- * the SWEETXNU payload in the ramdisk to loader_boot(). None of sweet's
+ * the MAPPLEPL payload in the ramdisk to loader_boot(). None of sweet's
  * Qualcomm probes (UFS, GIC, IMEM restart reason, PS_HOLD) run here: those
  * addresses belong to other blocks on MediaTek.
  */
@@ -109,7 +109,7 @@ void shim_main(uint64_t dtb)
 	if (fb)
 		con_fb = (volatile uint32_t *)fb;
 	con_clear(RED);
-	con_str("SHIM", "viva: xnu loader");
+	con_str("SHIM", "Open Mapple: xnu loader");
 	con_hex2("EL", "el=", rsr("CurrentEL") >> 2, "wdt=", rd32(TOPRGU_WDT_MODE));
 	con_hex("DTB", dtb);
 	con_hex("LK FB", fb);

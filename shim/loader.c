@@ -11,8 +11,8 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
-#ifdef VIVA
-const char *viva_bootfile(const char *payload_cmdline);	/* vivaboot.c */
+#ifdef MT6781_SHIM
+const char *mapple_bootfile(const char *payload_cmdline);	/* bootrec.c */
 #endif
 
 #define BOOT_LINE_LENGTH	608
@@ -70,7 +70,7 @@ static void zero64(uintptr_t dst, uint64_t n)
 
 static int magic_ok(const char *m)
 {
-	static const char want[] = "SWEETXNU";
+	static const char want[] = "MAPPLEPL";
 	for (int i = 0; i < 8; i++)
 		if (m[i] != want[i])
 			return 0;
@@ -90,7 +90,7 @@ const char *loader_boot(uintptr_t dtb)
 
 	const struct payload *p = (const struct payload *)rd_start;
 	if (!magic_ok(p->magic))
-		return "no SWEETXNU payload";
+		return "no MAPPLEPL payload";
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
 
@@ -99,9 +99,9 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
 
-#ifdef VIVA
-	/* boot-args saved by Viva Manager in userdata (VIVABOOT), read before the kernel is copied anywhere */
-	const char *cmdline = viva_bootfile(p->cmdline);
+#ifdef MT6781_SHIM
+	/* boot-args saved by Mapple in userdata (MAPPLEBR), read before the kernel is copied anywhere */
+	const char *cmdline = mapple_bootfile(p->cmdline);
 #endif
 
 	/* The payload must not overlap where the kernel goes. */
@@ -139,7 +139,7 @@ const char *loader_boot(uintptr_t dtb)
 	ba->Video.v_depth = 32;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
 	ba->deviceTreeLength = (uint32_t)p->adt_size;
-#ifdef VIVA
+#ifdef MT6781_SHIM
 	const char *line = cmdline;
 #else
 	const char *line = p->cmdline;
