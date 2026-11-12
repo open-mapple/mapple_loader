@@ -464,14 +464,15 @@ static void ili_download(uint32_t report_ms)
 
 /*
  * For the kernel's MT6781_ILI, which sends the firmware again when the chip has lost it (as Android's driver does at
- * every display resume): where this loader's copy is, " mp_ili_fw=<address of ili_blocks>" on the command line. The
- * loader stays in memory under XNU (it is where XNU returns to), and with the MMU off its addresses are physical.
+ * every display resume): where the firmware's table is, " mp_ili_fw=<address>" on the command line: this loader's own
+ * (it stays in memory under XNU, where XNU returns to) or the copy XNU_SHIM makes. With the MMU off addresses are
+ * physical.
  */
 #if XNU_TOUCH_ILI
-static void ili_xnu_args(char *cl)
+static void ili_xnu_args(char *cl, uint64_t table)
 {
 	static const char key[] = " mp_ili_fw=";
-	uint64_t v = (uint64_t)(uintptr_t)ili_blocks;
+	uint64_t v = table;
 	char d[24];
 	uint32_t at = 0, n = 0;
 
@@ -494,7 +495,7 @@ static void ili_xnu_args(char *cl)
 	}
 	cl[at] = 0;
 	out("ili: the firmware's table for the kernel at ");
-	out_hex((uint64_t)(uintptr_t)ili_blocks);
+	out_hex(table);
 	out("\n");
 }
 #endif

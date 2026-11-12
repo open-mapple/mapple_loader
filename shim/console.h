@@ -1,7 +1,12 @@
 #pragma once
 #include <stdint.h>
 
-#ifdef MT6781_SHIM
+#if defined(SPACED)
+#define FB_BASE		0x771b0000UL	/* LK atag,videolfb fb_base, the first of its three buffers */
+#define FB_W		1080
+#define FB_H		2412
+#define FB_STRIDE	(FB_W * 4)
+#elif defined(MT6781_SHIM)
 #define FB_BASE		0x7bc10000UL	/* LK atag,videolfb fb_base (measured) */
 #define FB_W		1080
 #define FB_H		2400

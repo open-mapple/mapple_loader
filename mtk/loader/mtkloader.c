@@ -217,6 +217,12 @@ static void xnu_ufs_args(char *cl);
 #define ILI_RELEASE_RST     1
 #define ILI_DOWNLOAD        1
 #endif
+/* 1: XNU is started through viva's shim (the payload's items "shim" and "xnu") instead of by this program: the
+ * MAPPLEPL payload where LK put the ramdisk, the touch firmware's table after it (mp_ili_fw=), LK's first framebuffer
+ * opaque and scanned, then the shim entered the way LK enters a kernel. No return to this program. */
+#ifndef XNU_SHIM
+#define XNU_SHIM            0
+#endif
 /* 1: read the eMMC and report, then go back to Android (no XNU). */
 #ifndef MSDC_TEST
 #define MSDC_TEST           0
@@ -382,6 +388,10 @@ struct payload_info {
 	const uint8_t *ramdisk;
 	uint32_t ramdisk_size;
 	const char *kernel_version;     /* kernel.ver (xnuloader/mkpayload.py): the kernel gets it as mapple_kver= */
+	const uint8_t *shim;            /* XNU_SHIM: viva's shim, an arm64 Image */
+	uint32_t shim_size;
+	const uint8_t *xnu;             /* XNU_SHIM: the shim's payload (kernel, device tree, command line) */
+	uint32_t xnu_size;
 };
 
 /* The XNU symbols the loader works with (kernel virtual addresses, 0 if absent). */
@@ -640,6 +650,12 @@ static int parse_payload(struct payload_info *pi)
 			pi->ramdisk_size = e->size;
 		} else if (strcmp(e->name, "kernel.ver") == 0 && e->size > 1) {
 			pi->kernel_version = (const char *)(p + sizeof(*e));
+		} else if (strcmp(e->name, "shim") == 0) {
+			pi->shim = p + sizeof(*e);
+			pi->shim_size = e->size;
+		} else if (strcmp(e->name, "xnu") == 0) {
+			pi->xnu = p + sizeof(*e);
+			pi->xnu_size = e->size;
 		}
 		p += sizeof(*e) + ((e->size + 15) & ~15u);
 	}
@@ -1130,6 +1146,20 @@ static void __attribute__((noreturn)) reset_board(void)
 static void touch_hand_back(void);
 #endif
 
+/* IMG, an arm64 Image, copied down to where LK puts a kernel and entered as LK enters one (x0: LK's tree). */
+static void __attribute__((noreturn)) chain_image(const volatile uint32_t *img, uint64_t image_size)
+{
+	volatile uint32_t *dst = (volatile uint32_t *)CHAIN_STUB_PA;
+	const volatile uint32_t *src = (const volatile uint32_t *)chain_stub;
+	for (uint64_t i = 0; i < (uint64_t)(chain_stub_end - chain_stub) / 4; i++) {
+		dst[i] = src[i];
+	}
+	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+	void (*stub)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) = (void *)CHAIN_STUB_PA;
+	stub(lk_dtb, KERNEL_PA, (uint64_t)img, image_size, KERNEL_PA);
+	__builtin_unreachable();
+}
+
 static void __attribute__((noreturn)) chain_android(void)
 {
 	const volatile uint64_t *hdr = (const volatile uint64_t *)_start;
@@ -1146,16 +1176,7 @@ static void __attribute__((noreturn)) chain_android(void)
 	touch_hand_back();
 #endif
 	out("starting Android\n");
-
-	volatile uint32_t *dst = (volatile uint32_t *)CHAIN_STUB_PA;
-	const volatile uint32_t *src = (const volatile uint32_t *)chain_stub;
-	for (uint64_t i = 0; i < (uint64_t)(chain_stub_end - chain_stub) / 4; i++) {
-		dst[i] = src[i];
-	}
-	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
-	void (*stub)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) = (void *)CHAIN_STUB_PA;
-	stub(lk_dtb, KERNEL_PA, (uint64_t)img, image_size, KERNEL_PA);
-	__builtin_unreachable();
+	chain_image(img, image_size);
 }
 
 void loader_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
@@ -1770,10 +1791,8 @@ static void read_screen(void)
  * XNU is back (start.S xnu_return_stub): MMU off, our vectors, our stack. Its log was
  * linearized and written back to RAM by XNU. Save it, show its end, then reset into Android.
  */
-#if XNU_PARK && SOC_IS_MT6781
-extern char xnu_park_pen[], xnu_park_pen_end[], xnu_park_flags[];
-
-/* ---- LK's device tree: one node added to /reserved-memory (big-endian, byte by byte: device memory) ---- */
+#if (XNU_PARK || XNU_SHIM) && SOC_IS_MT6781
+/* LK's device tree: big-endian, read byte by byte (device memory) */
 #define FDT_BEGIN_NODE      1
 #define FDT_END_NODE        2
 #define FDT_PROP            3
@@ -1786,6 +1805,61 @@ static uint32_t fdt_get(uint64_t at)
 
 	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
+#endif
+
+#if ((DVFS_PROBE && XNU_PARK) || XNU_SHIM) && SOC_IS_MT6781
+/* where a property of a node just below the root of LK's tree is, or 0 */
+static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32_t *len)
+{
+	uint64_t at = fdt_get(dtb + 8), end = at + fdt_get(dtb + 36), str = dtb + fdt_get(dtb + 12), nn = 0, pn = 0;
+	int depth = 0, inside = 0;
+
+	while (node[nn]) {
+		nn++;
+	}
+	while (prop[pn]) {
+		pn++;
+	}
+	while (fdt_get(dtb) == 0xd00dfeedu && at < end) {
+		uint32_t tok = fdt_get(dtb + at);
+
+		at += 4;
+		if (tok == FDT_BEGIN_NODE) {
+			uint64_t n = 0;
+
+			while (((const volatile char *)dtb)[at + n]) {
+				n++;
+			}
+			depth++;
+			if (depth == 2 && n == nn && memcmp_n((const volatile char *)dtb + at, node, n) == 0) {
+				inside = 1;
+			}
+			at += (n + 1 + 3) & ~3ULL;
+		} else if (tok == FDT_END_NODE) {
+			if (inside && depth == 2) {
+				return 0;
+			}
+			depth--;
+		} else if (tok == FDT_PROP) {
+			uint32_t l = fdt_get(dtb + at), nameoff = fdt_get(dtb + at + 4);
+
+			if (inside && depth == 2 && memcmp_n((const volatile char *)str + nameoff, prop, pn + 1) == 0) {
+				*len = l;
+				return dtb + at + 8;
+			}
+			at += 8 + ((l + 3) & ~3u);
+		} else if (tok != FDT_NOP) {
+			break;
+		}
+	}
+	return 0;
+}
+#endif
+
+#if XNU_PARK && SOC_IS_MT6781
+extern char xnu_park_pen[], xnu_park_pen_end[], xnu_park_flags[];
+
+/* ---- LK's device tree: one node added to /reserved-memory ---- */
 
 static void fdt_put(uint64_t at, uint32_t v)
 {
@@ -2209,52 +2283,6 @@ static void sspm_watch(const char *when)
 
 static uint32_t mp_lvts_golden;                    /* 0: not known */
 
-/* where a property of a node just below the root of LK's tree is, or 0 */
-static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32_t *len)
-{
-	uint64_t at = fdt_get(dtb + 8), end = at + fdt_get(dtb + 36), str = dtb + fdt_get(dtb + 12), nn = 0, pn = 0;
-	int depth = 0, inside = 0;
-
-	while (node[nn]) {
-		nn++;
-	}
-	while (prop[pn]) {
-		pn++;
-	}
-	while (fdt_get(dtb) == 0xd00dfeedu && at < end) {
-		uint32_t tok = fdt_get(dtb + at);
-
-		at += 4;
-		if (tok == FDT_BEGIN_NODE) {
-			uint64_t n = 0;
-
-			while (((const volatile char *)dtb)[at + n]) {
-				n++;
-			}
-			depth++;
-			if (depth == 2 && n == nn && memcmp_n((const volatile char *)dtb + at, node, n) == 0) {
-				inside = 1;
-			}
-			at += (n + 1 + 3) & ~3ULL;
-		} else if (tok == FDT_END_NODE) {
-			if (inside && depth == 2) {
-				return 0;
-			}
-			depth--;
-		} else if (tok == FDT_PROP) {
-			uint32_t l = fdt_get(dtb + at), nameoff = fdt_get(dtb + at + 4);
-
-			if (inside && depth == 2 && memcmp_n((const volatile char *)str + nameoff, prop, pn + 1) == 0) {
-				*len = l;
-				return dtb + at + 8;
-			}
-			at += 8 + ((l + 3) & ~3u);
-		} else if (tok != FDT_NOP) {
-			break;
-		}
-	}
-	return 0;
-}
 
 /* " mp_lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
  * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " mp_lvts_r=r<hex>.<hex>..."
@@ -3397,6 +3425,102 @@ static void big_cores_clock(void)
 	out(" MHz at the same 800 mV\n");
 }
 
+#if XNU_SHIM
+#define PAYLOAD_XNU_CMDLINE 0x48        /* the command line's offset in a MAPPLEPL payload (shim/loader.c) */
+
+struct ili_block_copy {                 /* struct ili_block as it lies in memory */
+	uint64_t name;
+	uint32_t mem, len, crc, pad;
+	uint64_t data;
+};
+
+static uint64_t align16k(uint64_t v)
+{
+	return (v + 0x3fffULL) & ~0x3fffULL;
+}
+
+#if XNU_TOUCH_ILI
+/* The touch firmware's table, names and blocks copied to AT (the shim overwrites this program); where the table is. */
+static uint64_t ili_table_copy(uint64_t at)
+{
+	const uint32_t n = sizeof(ili_blocks) / sizeof(ili_blocks[0]);
+	struct ili_block_copy *t = (struct ili_block_copy *)at;
+	uint64_t p = at + (n * sizeof(*t) + 15) / 16 * 16;
+
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t nl = (uint32_t)strlen(ili_blocks[i].name) + 1;
+		memcpy((void *)p, ili_blocks[i].name, nl);
+		t[i].name = p;
+		p += (nl + 15) / 16 * 16;
+		memcpy((void *)p, ili_blocks[i].data, ili_blocks[i].len);
+		t[i].mem = ili_blocks[i].mem;
+		t[i].len = ili_blocks[i].len;
+		t[i].crc = ili_blocks[i].crc;
+		t[i].pad = 0;
+		t[i].data = p;
+		p += (ili_blocks[i].len + 15) / 16 * 16;
+	}
+	return p;
+}
+#endif
+
+static void __attribute__((noreturn)) run_shim(void)
+{
+	struct payload_info pi;
+	uint32_t len = 0;
+	uint64_t rd = 0, at;
+
+	(void)parse_payload(&pi);
+	at = lk_prop(lk_dtb, "chosen", "linux,initrd-start", &len);
+	if (at && len == 8) {
+		rd = (uint64_t)fdt_get(at) << 32 | fdt_get(at + 4);
+	} else if (at && len == 4) {
+		rd = fdt_get(at);
+	}
+	if (!pi.shim || !pi.xnu || !rd || memcmp_n(pi.xnu, "MAPPLEPL", 8) != 0) {
+		out("ERROR: no shim, MAPPLEPL payload or ramdisk address\n");
+		dbg_delay_ms(5000);
+		chain_android();
+	}
+	uint64_t fw = align16k(rd + pi.xnu_size), end = fw;
+#if XNU_TOUCH_ILI
+	for (uint32_t i = 0; i < sizeof(ili_blocks) / sizeof(ili_blocks[0]); i++) {
+		end += 32 + 16 + ili_blocks[i].len + 16;
+	}
+#endif
+	out("shim ");
+	out_dec(pi.shim_size);
+	out(" bytes, MAPPLEPL ");
+	out_dec(pi.xnu_size);
+	out(" bytes at ");
+	out_hex(rd);
+	out("\n");
+	if ((uint64_t)pi.xnu + pi.xnu_size > rd || end > lk_dtb) {   /* LK's tree follows the ramdisk's room */
+		out("ERROR: the payload and the touch firmware do not fit before LK's tree\n");
+		dbg_delay_ms(5000);
+		chain_android();
+	}
+	memcpy((void *)rd, pi.xnu, pi.xnu_size);
+
+#if XNU_TOUCH_ILI && SOC_IS_MT6781
+	if (ili_probe()) {
+		ili_download(0);
+		ili_bb_begin();         /* the pins stay GPIOs, chip select high, for the kernel */
+		(void)ili_table_copy(fw);
+		ili_xnu_args((char *)(rd + PAYLOAD_XNU_CMDLINE), fw);
+	}
+#endif
+
+	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
+	display_find();
+	display_alpha_off();
+	wr32(OVL0_BASE + OVL_FB(OVL_L0_ADDR), (uint32_t)LK_FB_BASE);
+	out("\nstarting the shim\n");
+	marker_set(0);
+	chain_image((const volatile uint32_t *)pi.shim, (pi.shim_size + 7) & ~7ULL);
+}
+#endif
+
 static void __attribute__((noreturn)) run_xnu(void)
 {
 	struct payload_info pi;
@@ -3606,7 +3730,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 	xnu_ufs_args(ba->commandLine);
 #endif
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
-	ili_xnu_args(ba->commandLine);
+	ili_xnu_args(ba->commandLine, (uint64_t)(uintptr_t)ili_blocks);
 #endif
 #if XNU_PARK && SOC_IS_MT6781
 	xnu_park_setup(ba->commandLine);
@@ -5326,5 +5450,8 @@ void mtkloader_main(uint64_t dtb)
 	out_hex(dtb);
 	out("\n");
 	connsys_dt_report(dtb);         /* Wi-Fi step 1: what Android's tree says of CONNSYS (mtkconnsys.h) */
+#if XNU_SHIM
+	run_shim();
+#endif
 	run_xnu();
 }
