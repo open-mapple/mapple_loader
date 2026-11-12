@@ -1662,27 +1662,26 @@ static uint32_t mp_lvts_golden;                    /* 0: not known */
  * 118, 119, 190..196, in MediaTek's sensor order), for the kernel's calibration step. */
 /*
  * Safe boot, for when the boot record starts something that freezes the phone (Metal at boot, say) and the USB link
- * dies with it: release volume down after "Booting Darwin / XNU", then press it again within 3 s. The shim is then
- * told mp_bootrec=0 and boots the payload's own line. Keypad bit as volume_down_held(); three samples make a press.
+ * dies with it: keep holding volume down past "Booting Darwin / XNU" until "safe boot: mp_bootrec=0" shows (the 3 s
+ * window opens once the payload is copied). The shim is then told mp_bootrec=0 and boots the payload's own line. Let go
+ * (three samples up) and the window closes: a normal boot. Keypad bit as volume_down_held().
  */
 static void safe_boot_args(char *cl)
 {
-	uint32_t released = 0, pressed = 0;
+	uint32_t pressed = 0, released = 0;
 	char *at = cl;
 
-	out("safe boot (the payload's own line, no boot record): release volume down, then press it again (3 s)\n");
-	for (uint32_t t = 0; t < 30 && pressed < 3; t++) {
-		int down = !(rd32(0x10010004ULL) & (1u << 1));
-
-		if (!down) {
+	out("safe boot (the payload's own line, no boot record): keep holding volume down (3 s)\n");
+	for (uint32_t t = 0; t < 30 && released < 3; t++) {
+		if (rd32(0x10010004ULL) & (1u << 1)) {
 			released++;
-			pressed = 0;
-		} else if (released >= 3) {
+		} else {
 			pressed++;
+			released = 0;
 		}
 		dbg_delay_ms(100);
 	}
-	if (pressed < 3) {
+	if (pressed < 27) {
 		return;
 	}
 	while (*at) {
