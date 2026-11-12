@@ -134,7 +134,6 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #ifndef XNU_RETURN_AFTER
 #define XNU_RETURN_AFTER    "0"
 #endif
-/* 1: always start XNU (tools/xnu-cycle.sh); 0: Android unless asked once (tools/boot-xnu.sh). */
 /* 1: read the keypad and the volume keys' GPIO word for 8 s and report what changes (hold the keys); then on as usual. */
 #ifndef KEY_PROBE
 #define KEY_PROBE           0
@@ -191,11 +190,22 @@ static void xnu_ufs_args(char *cl);
 #ifndef SOC_PROBE
 #define SOC_PROBE           0
 #endif
-/* 1 (with PASS_THROUGH): once, when Android asks (printf OPENMAPPLE:MARKER-TEST > /dev/pmsg0; reboot), put a
- * pattern in the marker and reset the board; the next boot says if it survived. How: 1 the watchdog as run_xnu
- * arms it, 2 PSCI SYSTEM_RESET, 3 the watchdog with DDR reserve on (MT6781: TOPRGU MODE bit 7). */
+/* 1: always start XNU (tools/xnu-cycle.sh); 0: Android unless asked once (tools/boot-xnu.sh). */
 #ifndef MENU_DEFAULT_XNU
 #define MENU_DEFAULT_XNU    0
+#endif
+/* build.sh bringup (bringup.h's probes) or splitboot (splitboot.h); a release build has neither. */
+#ifndef BRINGUP
+#define BRINGUP             0
+#endif
+#ifndef SPLITBOOT
+#define SPLITBOOT           0
+#endif
+#if !BRINGUP && (KEY_PROBE || UFS_PROBE || UFS_READ_TEST || ILI_PROBE || TIMER_PROBE || PASS_THROUGH || SOC_PROBE)
+#error "probe flags need build.sh bringup"
+#endif
+#if XNU_PARK && !SPLITBOOT && !BRINGUP
+#error "XNU_PARK needs build.sh splitboot"
 #endif
 /*
  * 1: the kernel's text console on the screen (-v). It is a slow way to run -- scrolling reads
@@ -415,7 +425,7 @@ size_t strlen(const char *s)
 }
 
 /* 0 when the first n bytes are the same; device memory, so byte by byte. */
-static int memcmp_n(const volatile void *a, const void *b, size_t n)
+static int __attribute__((unused)) memcmp_n(const volatile void *a, const void *b, size_t n)
 {
 	const volatile uint8_t *x = a;
 	const uint8_t *y = b;
@@ -1781,196 +1791,8 @@ static uint32_t mp_dvfs_tbl[DVFS_TBL_WORDS];
 #endif
 
 #if XNU_PARK && SOC_IS_MT6781
-extern char xnu_park_pen[], xnu_park_pen_end[], xnu_park_flags[];
-
-/* ---- LK's device tree: one node added to /reserved-memory ---- */
-
-static void fdt_put(uint64_t at, uint32_t v)
-{
-	volatile uint8_t *p = (volatile uint8_t *)at;
-
-	p[0] = (uint8_t)(v >> 24);
-	p[1] = (uint8_t)(v >> 16);
-	p[2] = (uint8_t)(v >> 8);
-	p[3] = (uint8_t)v;
-}
-
-/* the offset of a name in the strings block, or -1 */
-static int64_t fdt_string(uint64_t dtb, const char *name)
-{
-	uint64_t str = dtb + fdt_get(dtb + 12), size = fdt_get(dtb + 32);
-
-	for (uint64_t at = 0; at < size;) {
-		uint64_t n = 0;
-
-		while (at + n < size && ((const volatile char *)str)[at + n]) {
-			n++;
-		}
-		if (memcmp_n((const volatile char *)str + at, name, n + 1) == 0) {
-			return (int64_t)at;
-		}
-		at += n + 1;
-	}
-	return -1;
-}
-
-/* where the END_NODE token of /reserved-memory is (from the tree's start), or 0 */
-static uint64_t fdt_reserved_end(uint64_t dtb)
-{
-	static const char name[] = "reserved-memory";
-	uint64_t at = fdt_get(dtb + 8), end = at + fdt_get(dtb + 36);
-	int depth = 0, inside = 0;
-
-	while (at < end) {
-		uint32_t tok = fdt_get(dtb + at);
-
-		at += 4;
-		if (tok == FDT_BEGIN_NODE) {
-			uint64_t n = 0;
-
-			while (((const volatile char *)dtb)[at + n]) {
-				n++;
-			}
-			depth++;
-			if (depth == 2 && n == sizeof(name) - 1 && memcmp_n((const volatile char *)dtb + at, name, n) == 0) {
-				inside = 1;
-			}
-			at += (n + 1 + 3) & ~3ULL;
-		} else if (tok == FDT_END_NODE) {
-			if (inside && depth == 2) {
-				return at - 4;
-			}
-			depth--;
-		} else if (tok == FDT_PROP) {
-			at += 8 + ((fdt_get(dtb + at) + 3) & ~3u);
-		} else if (tok != FDT_NOP) {
-			break;
-		}
-	}
-	return 0;
-}
-
-/* whether the node can go in: a version-17 tree, strings after the structure, /reserved-memory, "reg" and "no-map",
- * and room before the pen */
-static int fdt_pen_fits(uint64_t dtb)
-{
-	return fdt_get(dtb) == 0xd00dfeedu && fdt_get(dtb + 20) >= 17 &&
-	       fdt_get(dtb + 12) >= fdt_get(dtb + 8) + fdt_get(dtb + 36) && fdt_reserved_end(dtb) != 0 &&
-	       fdt_string(dtb, "reg") >= 0 && fdt_string(dtb, "no-map") >= 0 &&
-	       dtb + fdt_get(dtb + 4) + PARK_NODE_BYTES <= PARK_PA;
-}
-
-/* the pen's page as a no-map node, the last child of /reserved-memory: what follows moves up PARK_NODE_BYTES */
-static void fdt_reserve_pen(uint64_t dtb)
-{
-	static const char node[] = PARK_NODE;
-	uint64_t ins, total, w;
-	uint32_t reg, nomap;
-	volatile uint8_t *b = (volatile uint8_t *)dtb;
-
-	if (!fdt_pen_fits(dtb)) {
-		out("park: LK's device tree NOT changed (it no longer looks as expected): the pen is not reserved\n");
-		return;
-	}
-	ins = fdt_reserved_end(dtb);
-	total = fdt_get(dtb + 4);
-	reg = (uint32_t)fdt_string(dtb, "reg");                  /* before the strings move */
-	nomap = (uint32_t)fdt_string(dtb, "no-map");
-	for (uint64_t i = total; i-- > ins;) {
-		b[i + PARK_NODE_BYTES] = b[i];
-	}
-	w = dtb + ins;
-	fdt_put(w, FDT_BEGIN_NODE);
-	w += 4;
-	for (uint32_t i = 0; i < 20; i++) {
-		((volatile char *)w)[i] = i < sizeof(node) ? node[i] : 0;
-	}
-	w += 20;
-	fdt_put(w, FDT_PROP);
-	fdt_put(w + 4, 16);
-	fdt_put(w + 8, reg);
-	fdt_put(w + 12, 0);
-	fdt_put(w + 16, (uint32_t)PARK_PA);
-	fdt_put(w + 20, 0);
-	fdt_put(w + 24, 0x1000);
-	w += 28;
-	fdt_put(w, FDT_PROP);
-	fdt_put(w + 4, 0);
-	fdt_put(w + 8, nomap);
-	w += 12;
-	fdt_put(w, FDT_END_NODE);
-	fdt_put(dtb + 4, (uint32_t)(total + PARK_NODE_BYTES));
-	fdt_put(dtb + 12, fdt_get(dtb + 12) + PARK_NODE_BYTES);
-	fdt_put(dtb + 36, fdt_get(dtb + 36) + PARK_NODE_BYTES);
-	__asm__ volatile("dsb sy");
-	out("park: pen reserved in LK's device tree at ");
-	out_hex(PARK_PA);
-	out(" (" PARK_NODE ", no-map; the tree now ");
-	out_dec(total + PARK_NODE_BYTES);
-	out(" bytes)\n");
-}
-
-/* the pen copied to PARK_PA, its slots cleared, " loader_park=<PARK_PA>" on the command line -- only if LK's device tree
- * will take the node that keeps Linux off the pen */
-static void xnu_park_setup(char *cl)
-{
-	static const char key[] = " loader_park=";
-	volatile uint32_t *dst = (volatile uint32_t *)PARK_PA;
-	const volatile uint32_t *src = (const volatile uint32_t *)xnu_park_pen;
-	uint64_t v = PARK_PA;
-	char d[24];
-	uint32_t at = 0, n = 0;
-
-	if (!fdt_pen_fits(lk_dtb)) {
-		out("park: LK's device tree would not take the pen's node: no loader_park=, XNU's cores are switched off\n");
-		return;
-	}
-	for (uint64_t i = 0; i < (uint64_t)(xnu_park_pen_end - xnu_park_pen) / 4; i++) {
-		dst[i] = src[i];
-	}
-	__asm__ volatile("dsb sy");
-	while (cl[at]) {
-		at++;
-	}
-	do {
-		d[n++] = (char)('0' + v % 10);
-		v /= 10;
-	} while (v);
-	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
-		out("park: no room on the command line\n");
-		return;
-	}
-	for (uint32_t i = 0; key[i]; i++) {
-		cl[at++] = key[i];
-	}
-	while (n) {
-		cl[at++] = d[--n];
-	}
-	cl[at] = 0;
-	out("park: the pen for XNU's other cores at ");
-	out_hex(PARK_PA);
-	out("\n");
-}
-
-/* which cores are in the pen; how many */
-static int say_parked(void)
-{
-	const volatile uint32_t *slot = (const volatile uint32_t *)(PARK_PA + (uint64_t)(xnu_park_flags - xnu_park_pen));
-	int n = 0;
-
-	out("parked in the pen:");
-	for (int c = 0; c < 8; c++) {
-		if (slot[c] == 0x4b524150u) {
-			out(" ");
-			out_dec(c);
-			n++;
-		}
-	}
-	out("\n");
-	return n;
-}
+#include "splitboot.h"
 #endif
-
 
 #if RETURN_CPUS
 /* PSCI AFFINITY_INFO (SMC64): 0 on, 1 off, 2 turning on, negative an error */
@@ -2276,32 +2098,7 @@ static void rescue_log(void)
 #define GICR_SGI    (0x0c040000ULL + 0x10000)
 
 #if TIMER_PROBE
-static void gic_cpu_prepare(void)
-{
-	uint64_t sre, ctlr;
-
-	/*
-	 * ICC_CTLR_EL1.EOImode: with it set, ICC_EOIR1_EL1 only drops the priority and the
-	 * interrupt stays active until ICC_DIR_EL1 -- and XNU never writes that, so its first
-	 * timer interrupt would also be its last. Clear it for whoever runs on this core next.
-	 */
-	__asm__ volatile("mrs %0, ICC_CTLR_EL1" : "=r"(ctlr));
-	out("  ICC_CTLR_EL1 ");
-	out_hex(ctlr);
-	out(ctlr & 2 ? " (EOImode=1: EOI does not deactivate)" : " (EOImode=0)");
-	__asm__ volatile("msr ICC_CTLR_EL1, %0; isb" : : "r"(ctlr & ~2ULL));
-	__asm__ volatile("mrs %0, ICC_CTLR_EL1" : "=r"(ctlr));
-	out(" -> ");
-	out_hex(ctlr);
-	out("\n");
-
-	__asm__ volatile("mrs %0, ICC_SRE_EL1" : "=r"(sre));
-	__asm__ volatile("msr ICC_SRE_EL1, %0; isb" : : "r"(sre | 1));
-	__asm__ volatile("msr ICC_AP1R0_EL1, xzr");
-	__asm__ volatile("msr ICC_PMR_EL1, %0" : : "r"(0xffUL));
-	__asm__ volatile("msr ICC_BPR1_EL1, xzr");
-	__asm__ volatile("msr ICC_IGRPEN1_EL1, %0; isb" : : "r"(1UL));
-}
+static void timer_probe(void);   /* bringup.h */
 #endif
 
 /*
@@ -2327,82 +2124,6 @@ static void gic_fix_eoimode(void)
 	}
 	out("\n");
 }
-
-#if TIMER_PROBE
-static int timer_try(int ppi, int virt)
-{
-	uint64_t f = dbg_freq(), now, grp;
-	uint32_t before;
-
-	/* Group 1 NS, default priority, enabled: the same as XNU's gic_v3_irq_cpu_init(). */
-	wr32(GICR_SGI + 0x080, rd32(GICR_SGI + 0x080) | (1u << ppi));
-	wr32(GICR_SGI + 0xd00, rd32(GICR_SGI + 0xd00) & ~(1u << ppi));
-	*(volatile uint8_t *)(GICR_SGI + 0x400 + ppi) = 0xa0;
-	wr32(GICR_SGI + 0x100, 1u << ppi);
-	grp = rd32(GICR_SGI + 0x080);
-	wr32(GICR_SGI + 0x380, 1u << ppi); /* nothing of an earlier try left active */
-	irq_count = 0;
-	irq_intid = 0;
-
-  again:
-	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(now));
-	if (virt) {
-		__asm__ volatile("msr cntv_cval_el0, %0; msr cntv_ctl_el0, %1; isb" : : "r"(now + f / 10), "r"(1UL));
-	} else {
-		__asm__ volatile("msr cntp_cval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(now + f / 10), "r"(1UL));
-	}
-	before = rd32(GICR_SGI + 0x200);
-	irq_wait(now + f / 2);
-
-	out(virt ? "  virtual timer  PPI " : "  physical timer PPI ");
-	out_dec((uint64_t)ppi);
-	out(": IGROUPR0 ");
-	out_hex(grp);
-	out(grp & (1u << ppi) ? " (group 1)" : " (GROUP 0: not ours)");
-	out(", ISPENDR0 ");
-	out_hex(before);
-	out("->");
-	out_hex(rd32(GICR_SGI + 0x200));
-	out(", ISACTIVER0 after EOI ");
-	out_hex(rd32(GICR_SGI + 0x300));
-	out(", irqs ");
-	out_dec(irq_count);
-	if (irq_count) {
-		out(" intid ");
-		out_dec(irq_intid);
-	}
-	out(", ISACTIVER0 ");
-	out_hex(rd32(GICR_SGI + 0x300));
-	out("\n");
-	if (irq_count == 1) {
-		goto again;     /* a second one proves the first was deactivated */
-	}
-	__asm__ volatile("msr cntv_ctl_el0, %0; msr cntp_ctl_el0, %0; isb" : : "r"(2UL));
-	/* Leave this PPI as XNU must find it: disabled, not pending, not active. */
-	wr32(GICR_SGI + 0x180, 1u << ppi); /* ICENABLER0 */
-	wr32(GICR_SGI + 0x280, 1u << ppi); /* ICPENDR0   */
-	wr32(GICR_SGI + 0x380, 1u << ppi); /* ICACTIVER0 */
-	__asm__ volatile("dsb sy; isb");
-	return irq_count != 0;
-}
-
-static void timer_probe(void)
-{
-	out("timer probe at EL1:\n");
-	gic_cpu_prepare();
-	timer_try(27, 1);
-	timer_try(30, 0);
-	/* and the CPU interface as it was, so nothing of ours is left in it */
-	__asm__ volatile("msr ICC_IGRPEN1_EL1, xzr; msr ICC_AP1R0_EL1, xzr; isb");
-	out("  GICR after cleanup: ISENABLER0 ");
-	out_hex(rd32(GICR_SGI + 0x100));
-	out(" ISPENDR0 ");
-	out_hex(rd32(GICR_SGI + 0x200));
-	out(" ISACTIVER0 ");
-	out_hex(rd32(GICR_SGI + 0x300));
-	out("\n");
-}
-#endif /* TIMER_PROBE */
 
 /* ---- the watcher on the second core ---- */
 
@@ -3304,150 +3025,8 @@ static int boot_choice(void)
 }
 
 
-#if SOC_PROBE
-/* MT6781's OVL0 (the Hot 20's OVL0_BASE is disp_ccorr0 there); only OVL0: LK's display path keeps it clocked */
-#define PROBE_OVL0          0x14005000ULL
-#define PROBE_OVL_L0_SRC_SIZE 0x038      /* height << 16 | width */
-
-static void probe_reg(const char *name, uint64_t pa)
-{
-	out("probe: ");
-	out(name);
-	out(" ");
-	out_hex(rd32(pa));
-	out("\n");
-}
-
-static void soc_probe(void)
-{
-	uint64_t el, mpidr;
-
-	__asm__ volatile("mrs %0, CurrentEL" : "=r"(el));
-	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-	out("probe: EL ");
-	out_dec(el >> 2);
-	out(" MPIDR ");
-	out_hex(mpidr);
-	out("\n");
-	probe_reg("TOPRGU MODE", TOPRGU_MODE);
-	probe_reg("TOPRGU LENGTH", TOPRGU_LENGTH);
-	probe_reg("OVL0 SRC_CON", PROBE_OVL0 + OVL_SRC_CON);
-	/* each layer's registers are 0x20 above the one before; LK's framebuffer is on one of them */
-	for (uint32_t n = 0; n < 4; n++) {
-		uint64_t l = PROBE_OVL0 + 0x20 * n;
-
-		out("probe: OVL0 L");
-		out_dec(n);
-		out(" CON ");
-		out_hex(rd32(l + OVL_L0_CON));
-		out(" SRC_SIZE ");
-		out_hex(rd32(l + PROBE_OVL_L0_SRC_SIZE));
-		out(" PITCH ");
-		out_hex(rd32(l + OVL_L0_PITCH));
-		out(" ADDR ");
-		out_hex(rd32(l + OVL_L0_ADDR));
-		out("\n");
-	}
-	probe_reg("marker 0", MARKER_PA);
-	probe_reg("marker 1", MARKER_PA + 64);
-	probe_reg("marker 2", MARKER_PA + 128);
-}
-#endif
-
-
-
-#if KEY_PROBE
-/*
- * Read only. The keypad keeps a bit per key in KP_MEM1..5, clear while the key is down (the spaced device tree
- * maps volume down to its key 1; volume up is the PMIC's "reset key"); the device tree also names GPIO 80 and 81
- * for the volume keys, read here as the input word of pins 64..95 (its offset is a guess from the MT6768).
- */
-static void key_probe(void)
-{
-	uint32_t last[6], now[6];
-
-	for (int i = 0; i < 6; i++) {
-		last[i] = 0xdeadbeefu;
-	}
-	out("key probe: 8 s -- hold volume down, let go, hold volume up\n");
-	for (uint32_t t = 0; t < 80; t++) {
-		int changed = 0;
-
-		for (int i = 0; i < 5; i++) {
-			now[i] = rd32(0x10010004ULL + 4 * i) & 0xffffu;    /* KP_MEM1..5 */
-		}
-		now[5] = rd32(0x10005220ULL);                             /* GPIO DIN, pins 64..95 */
-		for (int i = 0; i < 6; i++) {
-			changed |= now[i] != last[i];
-			last[i] = now[i];
-		}
-		if (changed) {
-			out("key probe: ");
-			out_dec(t * 100);
-			out(" ms KP_MEM");
-			for (int i = 0; i < 5; i++) {
-				out(" ");
-				out_hex(now[i]);
-			}
-			out(" GPIO64-95 ");
-			out_hex(now[5]);
-			out("\n");
-		}
-		dbg_delay_ms(100);
-	}
-}
-#endif
-
 #if (UFS_PROBE || XNU_UFS) && SOC_IS_MT6781
 #define UFSHCI_BASE         0x11270000ULL
-#endif
-#if UFS_PROBE && SOC_IS_MT6781
-/*
- * Read only. The MT6781's UFS host controller (ufshci@11270000, "mediatek,mt8183-ufshci": standard UFSHCI
- * registers, JESD223) as LK leaves it: LK brings UFS up early and its last use of it is just before it starts the
- * kernel, with no shutdown in its log. Also LK's first UTP transfer request descriptor and the command descriptor
- * it points to, in DRAM, to see the list LK set up.
- */
-static void ufs_probe(void)
-{
-	static const struct { const char *name; uint32_t at; } regs[] = {
-		{ "CAP", 0x00 }, { "VER", 0x08 }, { "IS", 0x20 }, { "IE", 0x24 }, { "HCS", 0x30 }, { "HCE", 0x34 },
-		{ "UECPA", 0x38 }, { "UECDL", 0x3c }, { "UECN", 0x40 }, { "UECT", 0x44 }, { "UECDME", 0x48 },
-		{ "UTRIACR", 0x4c }, { "UTRLBA", 0x50 }, { "UTRLBAU", 0x54 }, { "UTRLDBR", 0x58 }, { "UTRLRSR", 0x60 },
-		{ "UTMRLBA", 0x70 }, { "UTMRLBAU", 0x74 }, { "UTMRLDBR", 0x78 }, { "UTMRLRSR", 0x80 },
-	};
-
-	for (uint32_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
-		out("ufs probe: ");
-		out(regs[i].name);
-		out(" ");
-		out_hex(rd32(UFSHCI_BASE + regs[i].at));
-		out("\n");
-	}
-	uint64_t utrl = rd32(UFSHCI_BASE + 0x50) | (uint64_t)rd32(UFSHCI_BASE + 0x54) << 32;
-	if (utrl < 0x40000000ULL || utrl >= 0x140000000ULL) {
-		out("ufs probe: no transfer request list in DRAM\n");
-		return;
-	}
-	out("ufs probe: UTRD 0:");
-	for (uint32_t w = 0; w < 8; w++) {
-		out(" ");
-		out_hex(rd32(utrl + 4 * w));
-	}
-	out("\n");
-	uint64_t ucd = (rd32(utrl + 16) & ~0x7fu) | (uint64_t)rd32(utrl + 20) << 32;
-	if (ucd >= 0x40000000ULL && ucd < 0x140000000ULL) {
-		out("ufs probe: UCD 0 at ");
-		out_hex(ucd);
-		out(":");
-		for (uint32_t w = 0; w < 8; w++) {
-			out(" ");
-			out_hex(rd32(ucd + 4 * w));
-		}
-		out("\n");
-	}
-}
-
 #endif
 
 #if (UFS_READ_TEST || XNU_UFS) && SOC_IS_MT6781
@@ -3578,32 +3157,6 @@ static uint64_t ufs_le(const volatile uint8_t *p, int n)
 }
 #endif
 
-#if UFS_READ_TEST && UFS_PROBE && SOC_IS_MT6781
-/* One 4 KiB read: LBA 1, the GPT header. */
-static int ufs_read_test(void)
-{
-	const uint64_t utrl = ufs_lk_list();
-	volatile uint8_t *data = ufs_data;
-
-	if (utrl == 0) {
-		return 0;
-	}
-	if (ufs_lk_read(utrl, 1, 1) == 1) {
-		return 1;
-	}
-	out("ufs read: LBA 1 starts \"");
-	for (uint32_t i = 0; i < 8; i++) {
-		char c[2] = { (data[i] >= 0x20 && data[i] < 0x7f) ? (char)data[i] : '.', 0 };
-		out(c);
-	}
-	uint64_t alt = ufs_le(data + 32, 8);
-	out("\", backup header at LBA ");
-	out_dec(alt);
-	out(alt == 15620095 ? " (as the GPT says)\n" : " (NOT 15620095)\n");
-	return 0;
-}
-#endif
-
 #if XNU_UFS && SOC_IS_MT6781
 static char *cl_put(char *at, const char *s)
 {
@@ -3724,6 +3277,10 @@ static void xnu_ufs_args(char *cl)
 	out_hex(utrl);
 	out("\n");
 }
+#endif
+
+#if BRINGUP
+#include "bringup.h"
 #endif
 
 void mtkloader_main(uint64_t dtb)

@@ -1,7 +1,12 @@
 #!/bin/bash
 # Build mtkloader.bin. MMU off means device memory: no SIMD, strict alignment, no builtins.
-# Extra arguments go to the compiler (e.g. -DXNU_WDT_SECONDS=0).
+# build.sh [bringup|splitboot] [compiler arguments, e.g. -DXNU_WDT_SECONDS=0]. No target: the release loader, which
+# refuses the probe flags (bringup.h) and XNU_PARK (splitboot.h).
 set -e
+case "${1:-}" in
+bringup)   shift; set -- -DBRINGUP=1 "$@" ;;
+splitboot) shift; set -- -DSPLITBOOT=1 "$@" ;;
+esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"     # the top of the tree (mtk/loader/ is two below it)
 
