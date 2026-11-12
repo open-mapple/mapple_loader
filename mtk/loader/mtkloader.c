@@ -2592,6 +2592,19 @@ static uint64_t ili_table_copy(uint64_t at)
 }
 #endif
 
+/* LK's /chosen linux,initrd-end moved to END, in place: the shim keeps the payload and the tables after it out of XNU's
+ * memory with mp_mem4g=1 */
+static void initrd_end_set(uint64_t end)
+{
+	uint32_t len = 0;
+	uint64_t at = lk_prop(lk_dtb, "chosen", "linux,initrd-end", &len);
+	volatile uint8_t *p = (volatile uint8_t *)at;
+
+	for (uint32_t i = 0; at && (len == 4 || len == 8) && i < len; i++) {
+		p[i] = (uint8_t)(end >> (8 * (len - 1 - i)));
+	}
+}
+
 static void __attribute__((noreturn)) run_shim(void)
 {
 	struct payload_info pi;
@@ -2632,6 +2645,7 @@ static void __attribute__((noreturn)) run_shim(void)
 	}
 	memcpy((void *)rd, pi.xnu, pi.xnu_size);
 	safe_boot_args((char *)(rd + PAYLOAD_XNU_CMDLINE));
+	initrd_end_set(end);
 
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
 	if (ili_probe()) {
