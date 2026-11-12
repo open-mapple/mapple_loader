@@ -1856,6 +1856,87 @@ static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32
 }
 #endif
 
+#if ((DVFS_PROBE && XNU_PARK) || XNU_SHIM) && SOC_IS_MT6781
+static uint32_t mp_lvts_golden;                    /* 0: not known */
+
+/* " mp_lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
+ * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " mp_lvts_r=r<hex>.<hex>..."
+ * (a string: a number would not hold nine): the nine sensors' calibration counts (count_r, bits 23..0 of efuse words
+ * 118, 119, 190..196, in MediaTek's sensor order), for the kernel's calibration step. */
+static void lvts_args(char *cl)
+{
+	uint32_t len = 0;
+	uint64_t info = lk_prop(lk_dtb, "chosen", "atag,devinfo", &len);
+	char *at = cl;
+
+	if (info == 0 || len < 4 * 114) {
+		out("lvts: no atag,devinfo in LK's tree (or too short): no golden value, no mp_lvts_golden\n");
+		return;
+	}
+	out("lvts: LK's devinfo: ");
+	out_dec(rd32(info));
+	out(" words; word 7 (speed bin) ");
+	out_hex(rd32(info + 4 * 8));
+	out(", segment ");
+	out_dec(rd32(info + 4 * 8) & 0xf);
+	out("; word 112 ");
+	out_hex(rd32(info + 4 * 113));
+	mp_lvts_golden = rd32(info + 4 * 113) & 0xff;
+	out(", golden ");
+	out_dec(mp_lvts_golden);
+	out("\n");
+	if (mp_lvts_golden == 0) {
+		return;
+	}
+	while (*at) {
+		at++;
+	}
+	if ((uint32_t)(at - cl) + 90 >= BOOT_LINE_LENGTH) {
+		out("lvts: no room on the command line; no mp_lvts_golden, no mp_lvts_r\n");
+		return;
+	}
+	for (const char *s = " mp_lvts_golden="; *s; s++) {
+		*at++ = *s;
+	}
+	if (mp_lvts_golden >= 100) {
+		*at++ = (char)('0' + mp_lvts_golden / 100);
+	}
+	if (mp_lvts_golden >= 10) {
+		*at++ = (char)('0' + mp_lvts_golden / 10 % 10);
+	}
+	*at++ = (char)('0' + mp_lvts_golden % 10);
+	*at = 0;
+	if (len < 4 * 198) {
+		out("lvts: devinfo too short for the calibration counts: no mp_lvts_r\n");
+		return;
+	}
+	out("lvts: count_r:");
+	for (const char *s = " mp_lvts_r=r"; *s; s++) {
+		*at++ = *s;
+	}
+	for (uint32_t i = 0; i < 9; i++) {
+		uint32_t word = i < 2 ? 118 + i : 190 + (i - 2), v = rd32(info + 4 * (word + 1)) & 0xffffff;
+		int shown = 0;
+
+		out(" ");
+		out_hex(v);
+		if (i) {
+			*at++ = '.';
+		}
+		for (int sh = 20; sh >= 0; sh -= 4) {
+			uint32_t d = (v >> sh) & 0xf;
+
+			if (d || shown || sh == 0) {
+				*at++ = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+				shown = 1;
+			}
+		}
+	}
+	*at = 0;
+	out("\n");
+}
+#endif
+
 #if XNU_PARK && SOC_IS_MT6781
 extern char xnu_park_pen[], xnu_park_pen_end[], xnu_park_flags[];
 
@@ -2281,85 +2362,8 @@ static void sspm_watch(const char *when)
 #define INFRA_CG0_STA       0x10001090ULL
 #define INFRA_THERM_CG      (1u << 10)
 
-static uint32_t mp_lvts_golden;                    /* 0: not known */
 
 
-/* " mp_lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
- * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " mp_lvts_r=r<hex>.<hex>..."
- * (a string: a number would not hold nine): the nine sensors' calibration counts (count_r, bits 23..0 of efuse words
- * 118, 119, 190..196, in MediaTek's sensor order), for the kernel's calibration step. */
-static void lvts_args(char *cl)
-{
-	uint32_t len = 0;
-	uint64_t info = lk_prop(lk_dtb, "chosen", "atag,devinfo", &len);
-	char *at = cl;
-
-	if (info == 0 || len < 4 * 114) {
-		out("lvts: no atag,devinfo in LK's tree (or too short): no golden value, no mp_lvts_golden\n");
-		return;
-	}
-	out("lvts: LK's devinfo: ");
-	out_dec(rd32(info));
-	out(" words; word 7 (speed bin) ");
-	out_hex(rd32(info + 4 * 8));
-	out(", segment ");
-	out_dec(rd32(info + 4 * 8) & 0xf);
-	out("; word 112 ");
-	out_hex(rd32(info + 4 * 113));
-	mp_lvts_golden = rd32(info + 4 * 113) & 0xff;
-	out(", golden ");
-	out_dec(mp_lvts_golden);
-	out("\n");
-	if (mp_lvts_golden == 0) {
-		return;
-	}
-	while (*at) {
-		at++;
-	}
-	if ((uint32_t)(at - cl) + 90 >= BOOT_LINE_LENGTH) {
-		out("lvts: no room on the command line; no mp_lvts_golden, no mp_lvts_r\n");
-		return;
-	}
-	for (const char *s = " mp_lvts_golden="; *s; s++) {
-		*at++ = *s;
-	}
-	if (mp_lvts_golden >= 100) {
-		*at++ = (char)('0' + mp_lvts_golden / 100);
-	}
-	if (mp_lvts_golden >= 10) {
-		*at++ = (char)('0' + mp_lvts_golden / 10 % 10);
-	}
-	*at++ = (char)('0' + mp_lvts_golden % 10);
-	*at = 0;
-	if (len < 4 * 198) {
-		out("lvts: devinfo too short for the calibration counts: no mp_lvts_r\n");
-		return;
-	}
-	out("lvts: count_r:");
-	for (const char *s = " mp_lvts_r=r"; *s; s++) {
-		*at++ = *s;
-	}
-	for (uint32_t i = 0; i < 9; i++) {
-		uint32_t word = i < 2 ? 118 + i : 190 + (i - 2), v = rd32(info + 4 * (word + 1)) & 0xffffff;
-		int shown = 0;
-
-		out(" ");
-		out_hex(v);
-		if (i) {
-			*at++ = '.';
-		}
-		for (int sh = 20; sh >= 0; sh -= 4) {
-			uint32_t d = (v >> sh) & 0xf;
-
-			if (d || shown || sh == 0) {
-				*at++ = (char)(d < 10 ? '0' + d : 'a' + d - 10);
-				shown = 1;
-			}
-		}
-	}
-	*at = 0;
-	out("\n");
-}
 
 /*
  * For the kernel's MT6781_DVFS: LK's three operating-point tables (dvfsp@0011bc00's L-table, B-table, CCI-table: 16
@@ -3510,6 +3514,7 @@ static void __attribute__((noreturn)) run_shim(void)
 		ili_xnu_args((char *)(rd + PAYLOAD_XNU_CMDLINE), fw);
 	}
 #endif
+	lvts_args((char *)(rd + PAYLOAD_XNU_CMDLINE));     /* this phone's thermal calibration, for viva's LVTS code */
 
 	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
 	display_find();
