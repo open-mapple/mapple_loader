@@ -207,6 +207,11 @@ const char *mapple_bootfile(const char *payload)
 		lun = (uint8_t)(v[0] - '0');
 	char root[37];
 	if (!(arg(payload, "mp_ufsroot", root, sizeof(root)) || arg(payload, "ufsroot", root, sizeof(root)))) {
+#ifdef SPACED
+		/* userdata is Android's on this phone: the record lives only in the named root partition */
+		con_str("BOOTFILE", "off (no mp_ufsroot=)");
+		return payload;
+#endif
 		const char *d = "userdata";
 		int i = 0;
 		for (; d[i]; i++)
