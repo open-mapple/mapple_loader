@@ -1660,6 +1660,45 @@ static uint32_t mp_lvts_golden;                    /* 0: not known */
  * words are LK's memory as it is (little-endian), not the tree's big-endian cells. With them, " mp_lvts_r=r<hex>.<hex>..."
  * (a string: a number would not hold nine): the nine sensors' calibration counts (count_r, bits 23..0 of efuse words
  * 118, 119, 190..196, in MediaTek's sensor order), for the kernel's calibration step. */
+/*
+ * Safe boot, for when the boot record starts something that freezes the phone (Metal at boot, say) and the USB link
+ * dies with it: release volume down after "Booting Darwin / XNU", then press it again within 3 s. The shim is then
+ * told mp_bootrec=0 and boots the payload's own line. Keypad bit as volume_down_held(); three samples make a press.
+ */
+static void safe_boot_args(char *cl)
+{
+	uint32_t released = 0, pressed = 0;
+	char *at = cl;
+
+	out("safe boot (the payload's own line, no boot record): release volume down, then press it again (3 s)\n");
+	for (uint32_t t = 0; t < 30 && pressed < 3; t++) {
+		int down = !(rd32(0x10010004ULL) & (1u << 1));
+
+		if (!down) {
+			released++;
+			pressed = 0;
+		} else if (released >= 3) {
+			pressed++;
+		}
+		dbg_delay_ms(100);
+	}
+	if (pressed < 3) {
+		return;
+	}
+	while (*at) {
+		at++;
+	}
+	if ((uint32_t)(at - cl) + 14 >= BOOT_LINE_LENGTH) {
+		out("safe boot: no room on the command line\n");
+		return;
+	}
+	for (const char *s = " mp_bootrec=0"; *s; s++) {
+		*at++ = *s;
+	}
+	*at = 0;
+	out("safe boot: mp_bootrec=0\n");
+}
+
 static void lvts_args(char *cl)
 {
 	uint32_t len = 0;
@@ -2592,6 +2631,7 @@ static void __attribute__((noreturn)) run_shim(void)
 		chain_android();
 	}
 	memcpy((void *)rd, pi.xnu, pi.xnu_size);
+	safe_boot_args((char *)(rd + PAYLOAD_XNU_CMDLINE));
 
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
 	if (ili_probe()) {
