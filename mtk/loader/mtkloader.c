@@ -1935,6 +1935,62 @@ static void lvts_args(char *cl)
 	*at = 0;
 	out("\n");
 }
+
+/*
+ * For the kernel's DVFS: LK's three operating-point tables (dvfsp@0011bc00's L-table, B-table, CCI-table: 16 rows of
+ * MHz, voltage step, post divider, clock divider each), copied to tbl as they are and " mp_dvfs_tbl=<address>" on the
+ * command line (physical, as mp_ili_fw=). Nothing if a table is missing or not 64 cells.
+ */
+#define DVFS_TBL_WORDS      (3 * 64)
+
+static void dvfs_args(char *cl, uint32_t *tbl)
+{
+	static const char *const names[3] = { "L-table", "B-table", "CCI-table" };
+	static const char key[] = " mp_dvfs_tbl=";
+	uint64_t v = (uint64_t)(uintptr_t)tbl;
+	char d[24];
+	uint32_t at = 0, n = 0;
+
+	for (uint32_t t = 0; t < 3; t++) {
+		uint32_t len = 0;
+		uint64_t cells = lk_prop(lk_dtb, "dvfsp@0011bc00", names[t], &len);
+
+		if (cells == 0 || len != 64 * 4) {
+			out("dvfs: LK's ");
+			out(names[t]);
+			out(" missing or not 64 cells: no mp_dvfs_tbl\n");
+			return;
+		}
+		for (uint32_t w = 0; w < 64; w++) {
+			tbl[64 * t + w] = fdt_get(cells + 4 * w);
+		}
+	}
+	while (cl[at]) {
+		at++;
+	}
+	do {
+		d[n++] = (char)('0' + v % 10);
+		v /= 10;
+	} while (v);
+	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
+		out("dvfs: no room on the command line for mp_dvfs_tbl=\n");
+		return;
+	}
+	for (uint32_t i = 0; key[i]; i++) {
+		cl[at++] = key[i];
+	}
+	while (n) {
+		cl[at++] = d[--n];
+	}
+	cl[at] = 0;
+	out("dvfs: LK's tables for the kernel at ");
+	out_hex((uint64_t)(uintptr_t)tbl);
+	out("\n");
+}
+
+#if XNU_PARK
+static uint32_t mp_dvfs_tbl[DVFS_TBL_WORDS];
+#endif
 #endif
 
 #if XNU_PARK && SOC_IS_MT6781
@@ -2365,58 +2421,6 @@ static void sspm_watch(const char *when)
 
 
 
-/*
- * For the kernel's MT6781_DVFS: LK's three operating-point tables (dvfsp@0011bc00's L-table, B-table, CCI-table: 16
- * rows of MHz, voltage step, post divider, clock divider each), copied here as they are and " mp_dvfs_tbl=<address>" on
- * the command line (the loader stays in memory under XNU, its addresses physical, as mp_ili_fw=). Nothing if a table is
- * missing or not 64 cells.
- */
-static uint32_t mp_dvfs_tbl[3 * 64];
-
-static void dvfs_args(char *cl)
-{
-	static const char *const names[3] = { "L-table", "B-table", "CCI-table" };
-	static const char key[] = " mp_dvfs_tbl=";
-	uint64_t v = (uint64_t)(uintptr_t)mp_dvfs_tbl;
-	char d[24];
-	uint32_t at = 0, n = 0;
-
-	for (uint32_t t = 0; t < 3; t++) {
-		uint32_t len = 0;
-		uint64_t cells = lk_prop(lk_dtb, "dvfsp@0011bc00", names[t], &len);
-
-		if (cells == 0 || len != 64 * 4) {
-			out("dvfs: LK's ");
-			out(names[t]);
-			out(" missing or not 64 cells: no mp_dvfs_tbl\n");
-			return;
-		}
-		for (uint32_t w = 0; w < 64; w++) {
-			mp_dvfs_tbl[64 * t + w] = fdt_get(cells + 4 * w);
-		}
-	}
-	while (cl[at]) {
-		at++;
-	}
-	do {
-		d[n++] = (char)('0' + v % 10);
-		v /= 10;
-	} while (v);
-	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
-		out("dvfs: no room on the command line for mp_dvfs_tbl=\n");
-		return;
-	}
-	for (uint32_t i = 0; key[i]; i++) {
-		cl[at++] = key[i];
-	}
-	while (n) {
-		cl[at++] = d[--n];
-	}
-	cl[at] = 0;
-	out("dvfs: LK's tables for the kernel at ");
-	out_hex((uint64_t)(uintptr_t)mp_dvfs_tbl);
-	out("\n");
-}
 
 static void lvts_show(const char *when)
 {
@@ -3492,6 +3496,10 @@ static void __attribute__((noreturn)) run_shim(void)
 		end += 32 + 16 + ili_blocks[i].len + 16;
 	}
 #endif
+#if SOC_IS_MT6781
+	uint64_t tbl = (end + 15) & ~15ULL;     /* LK's OPP tables, after the most the touch firmware can take */
+	end = tbl + DVFS_TBL_WORDS * 4;
+#endif
 	out("shim ");
 	out_dec(pi.shim_size);
 	out(" bytes, MAPPLEPL ");
@@ -3514,7 +3522,10 @@ static void __attribute__((noreturn)) run_shim(void)
 		ili_xnu_args((char *)(rd + PAYLOAD_XNU_CMDLINE), fw);
 	}
 #endif
+#if SOC_IS_MT6781
 	lvts_args((char *)(rd + PAYLOAD_XNU_CMDLINE));     /* this phone's thermal calibration, for viva's LVTS code */
+	dvfs_args((char *)(rd + PAYLOAD_XNU_CMDLINE), (uint32_t *)tbl);
+#endif
 
 	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
 	display_find();
@@ -3742,7 +3753,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 #endif
 #if DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
 	lvts_args(ba->commandLine);
-	dvfs_args(ba->commandLine);
+	dvfs_args(ba->commandLine, mp_dvfs_tbl);
 #endif
 
 	out("md0 ");
