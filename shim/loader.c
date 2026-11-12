@@ -16,6 +16,7 @@ const char *mapple_bootfile(const char *payload_cmdline);	/* bootrec.c */
 #endif
 
 #define BOOT_LINE_LENGTH	608
+#define MAPPLE_PAYLOAD_LINE_OFF	0x1000	/* in the boot_args page, after struct boot_args */
 #define PAGE_16K		0x4000UL
 
 struct payload_seg {
@@ -146,6 +147,16 @@ const char *loader_boot(uintptr_t dtb)
 #endif
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
 		ba->CommandLine[i] = line[i];
+#ifdef MT6781_SHIM
+	/* the payload's own line, for the kernel when the record replaced it (xnu mapple_sysctl.c) */
+	if (line != p->cmdline) {
+		volatile char *keep = (volatile char *)(ba_pa + MAPPLE_PAYLOAD_LINE_OFF);
+		for (int i = 0; i < 8; i++)
+			keep[i] = "MAPPLEPC"[i];
+		for (int i = 0; i < BOOT_LINE_LENGTH; i++)
+			keep[8 + i] = p->cmdline[i];
+	}
+#endif
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
