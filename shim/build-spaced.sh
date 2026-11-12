@@ -8,12 +8,12 @@ CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgenera
 LLD=${LLD:-ld.lld}
 mkdir -p out/spaced
 OBJS=()
-for f in start.S mt6781.c console.c fdt.c loader.c bootrec.c; do
+for f in start.S mt6781.c console.c fdt.c holes.c loader.c bootrec.c; do
 	o=out/spaced/${f%.*}.o
 	clang $CFLAGS -c $f -o $o
 	OBJS+=($o)
 done
-[ -z "${CHECK_ABS:-}" ] || python3 "$CHECK_ABS" out/spaced/mt6781.o out/spaced/console.o out/spaced/fdt.o out/spaced/loader.o out/spaced/bootrec.o
+[ -z "${CHECK_ABS:-}" ] || python3 "$CHECK_ABS" out/spaced/mt6781.o out/spaced/console.o out/spaced/fdt.o out/spaced/holes.o out/spaced/loader.o out/spaced/bootrec.o
 $LLD -T shim.ld --build-id=none -N "${OBJS[@]}" -o out/spaced/shim.elf
 $LLD -T shim.ld --build-id=none -N "${OBJS[@]}" --oformat=binary -o out/spaced/Image
 size=$(python3 -c "import struct,sys; d=open('out/spaced/Image','rb').read(64); print(struct.unpack_from('<Q', d, 16)[0])")

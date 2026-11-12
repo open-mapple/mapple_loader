@@ -12,12 +12,43 @@
 #include "fdt.h"
 #include "loader.h"
 #ifdef MT6781_SHIM
+#include "holes.h"
 const char *mapple_bootfile(const char *payload_cmdline);	/* bootrec.c */
 #endif
 
 #define BOOT_LINE_LENGTH	608
 #define MAPPLE_PAYLOAD_LINE_OFF	0x1000	/* in the boot_args page, after struct boot_args */
 #define PAGE_16K		0x4000UL
+
+#ifdef MT6781_SHIM
+/* mp_mem4g=1: XNU's RAM starts at DRAM's start instead of the payload's phys_base, minus the holes (holes.c), whose
+ * list is left in the boot_args page for the kernel (arm_vm_init.c) */
+#define DRAM_BASE		0x40000000UL
+#define MAPPLE_HOLES_OFF	0x2000	/* in the boot_args page, after the payload's line */
+
+struct mapple_holes {
+	char magic[8];			/* "MPHOLES1" */
+	uint32_t count, pad;
+	uint64_t range[HOLES_MAX][2];	/* [base, end), sorted, 16 KiB pages */
+};
+
+static uint64_t mem4g_holes[HOLES_MAX][2];
+extern char _end[];
+
+static int has_arg(const char *line, const char *arg)
+{
+	for (int i = 0; i < BOOT_LINE_LENGTH && line[i]; i++) {
+		if (i && line[i - 1] != ' ')
+			continue;
+		int k = 0;
+		while (arg[k] && i + k < BOOT_LINE_LENGTH && line[i + k] == arg[k])
+			k++;
+		if (!arg[k] && (i + k == BOOT_LINE_LENGTH || line[i + k] == ' ' || line[i + k] == 0))
+			return 1;
+	}
+	return 0;
+}
+#endif
 
 struct payload_seg {
 	uint64_t vmaddr, vmsize, file_off, file_size;
@@ -95,7 +126,7 @@ const char *loader_boot(uintptr_t dtb)
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
 		return "bad payload header";
 
-	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
+	uint64_t pa_of_va_base;		/* pa = va + this */
 	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
 	con_hex("VIRT", p->virt_base);
 	con_hex("ENTRY", p->entry_va);
@@ -105,8 +136,37 @@ const char *loader_boot(uintptr_t dtb)
 	const char *cmdline = mapple_bootfile(p->cmdline);
 #endif
 
+	uint64_t phys_base = p->phys_base, mem_size = p->mem_size;
+#ifdef MT6781_SHIM
+	int nholes = -1;
+	if (has_arg(cmdline, "mp_mem4g=1")) {
+		uint64_t end = p->phys_base + p->mem_size;
+		uint64_t adt = p->kernel_end - p->virt_base + DRAM_BASE;
+		uint64_t top = ((adt + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
+
+		nholes = mem_holes(dtb, rd_start, rd_end, DRAM_BASE, end, mem4g_holes);
+		for (int i = 0; i < nholes; i++)
+			if (mem4g_holes[i][0] < top)
+				nholes = -1;		/* the kernel would land in a hole */
+		for (uint32_t i = 0; i < p->nsegs; i++)
+			if (p->segs[i].vmaddr - p->virt_base + DRAM_BASE < (uintptr_t)_end)
+				nholes = -1;		/* or over this program */
+		if (nholes > 0) {
+			uint64_t free = end - DRAM_BASE;
+			for (int i = 0; i < nholes; i++)
+				free -= mem4g_holes[i][1] - mem4g_holes[i][0];
+			phys_base = DRAM_BASE;
+			mem_size = end - DRAM_BASE;
+			con_hex2("MEM4G", "holes=", nholes, "free MiB=", free >> 20);
+		} else {
+			con_str("MEM4G", "no usable hole list: the 2 GB layout");
+		}
+	}
+#endif
+	pa_of_va_base = phys_base - p->virt_base;
+
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
+	if (rd_end > phys_base && rd_start < phys_base + mem_size && phys_base == p->phys_base)
 		return "ramdisk overlaps kernel memory";
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
@@ -129,8 +189,8 @@ const char *loader_boot(uintptr_t dtb)
 	ba->Revision = 2;
 	ba->Version = 2;
 	ba->virtBase = p->virt_base;
-	ba->physBase = p->phys_base;
-	ba->memSize = p->mem_size;
+	ba->physBase = phys_base;
+	ba->memSize = mem_size;
 	ba->topOfKernelData = top;
 	ba->Video.v_baseAddr = FB_BASE;
 	ba->Video.v_display = 1;
@@ -157,7 +217,19 @@ const char *loader_boot(uintptr_t dtb)
 			keep[8 + i] = p->cmdline[i];
 	}
 #endif
-	ba->memSizeActual = p->mem_size;
+	ba->memSizeActual = mem_size;
+#ifdef MT6781_SHIM
+	if (nholes > 0) {
+		volatile struct mapple_holes *mh = (volatile struct mapple_holes *)(ba_pa + MAPPLE_HOLES_OFF);
+		for (int i = 0; i < 8; i++)
+			mh->magic[i] = "MPHOLES1"[i];
+		mh->count = (uint32_t)nholes;
+		for (int i = 0; i < nholes; i++) {
+			mh->range[i][0] = mem4g_holes[i][0];
+			mh->range[i][1] = mem4g_holes[i][1];
+		}
+	}
+#endif
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
