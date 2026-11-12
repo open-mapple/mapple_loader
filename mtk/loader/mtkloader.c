@@ -1,5 +1,5 @@
 /*
- * mtkloader: boots XNU on the Infinix Hot 20 (X6826B, MT6768) from boot_a, and brings Android
+ * mtkloader: boots XNU on the realme 8i (MT6781) from boot_a, and brings Android
  * back afterwards with XNU's log in pstore.
  *
  * The boot image's kernel (tools/chainboot.py) is this program, then Android's own kernel Image
@@ -14,40 +14,26 @@
  * The log ends up in /sys/fs/pstore/console-ramoops-0 under Android. See mtkdbg.h for the
  * screen and ramoops output.
  *
- * Display: the panel is video mode and keeps scanning OVL0 layer 0 (LK's framebuffer,
- * 0x787b0000, pitch 2944 = 736 pixels). LK enables per-pixel alpha on that layer, and XNU's
- * console writes 0x00rrggbb pixels: fully transparent. So per-pixel alpha is switched off, and
- * XNU's color table gets alpha 0xff besides.
+ * Display: the panel is video mode and keeps scanning OVL0 layer 0 (LK's framebuffer). LK
+ * enables per-pixel alpha on that layer, and XNU's console writes 0x00rrggbb pixels: fully
+ * transparent. So per-pixel alpha is switched off, and XNU's color table gets alpha 0xff besides.
  */
 #include <stdint.h>
 #include <stddef.h>
 #include "mtkdbg.h"
-#include "msdc.h"
 #include "mtkspi.h"
 #include "tcm.h"
 #include "../../xnuloader/identity.h"   /* made from your IPSW by xnuloader/mkidentity.sh */
 
 /* XNU's view of memory: one contiguous range that nothing else (LK, Android, TEE, ATF, the
  * framebuffer) uses; 0xc0000000-0xfe000000 is free DRAM on this board. */
-#ifdef SOC_MT6781
 /* realme 8i (4 GB): the largest free range, up to dramc-rk0 at 0x13ffff000 (2 GB; DRAM ends at 0x140000000) */
 #define XNU_PHYS_BASE       0xc0000000ULL
 #define XNU_MEM_SIZE        0x7fffc000ULL
 #define DRAM_END_GB         5
 #define SOC_IS_MT6781       1
-#else
-#define XNU_PHYS_BASE       0xc0000000ULL
-#define XNU_MEM_SIZE        0xfe000000ULL       /* up to dramc-rk1 at 0x1bffff000; room for the system image */
-#define DRAM_END_GB         8
-#define SOC_IS_MT6781       0
-#endif
 /* Where the system image is put, clear of the kernel, as xnuloader does it (RESIDENT_RD_OFFSET). */
 #define SYSTEM_PA           (XNU_PHYS_BASE + 0x08000000ULL)
-#define SYSTEM_PART         "xnusys"
-/* 0: all of it. Smaller is for trying the path out: packfs will not mount a half image. */
-#ifndef SYSTEM_MAX_MB
-#define SYSTEM_MAX_MB       0
-#endif
 /* boot_args.virtBase, as xnuloader/loader.c has it: the kernel's text is 48 MB above it. */
 #define KERNEL_VIRT_BASE    0xfffffff004000000ULL
 #define XNU_SLIDE           (XNU_PHYS_BASE - KERNEL_VIRT_BASE)
@@ -86,26 +72,6 @@
  * console, ftrace 4 KB, pmsg 64 KB, in that order). */
 #ifndef XNU_BIG_PSTORE
 #define XNU_BIG_PSTORE      0
-#endif
-/* 1 (MT6781, with XNU_PARK's device-tree helpers): before XNU, the CPU clocks as they are -- each cluster's PLL and
- * divider, the operating-point tables in LK's device tree (dvfsp@0011bc00), and the start of the CPU DVFS SRAM shared
- * with SSPM ("CSRAM"), LK's tables checked against it (table_check); and, before XNU and again at the hand-back, what
- * of SSPM changes meanwhile (sspm_watch) and the CPU temperature (lvts_show; mp_lvts_golden= for the kernel). Only read. */
-#ifndef DVFS_PROBE
-#define DVFS_PROBE          0
-#endif
-#if DVFS_PROBE && !XNU_PARK
-#error "DVFS_PROBE reads LK's device tree with XNU_PARK's helpers"
-#endif
-/* 1 (MT6781, with DVFS_PROBE): before XNU, one question to SSPM -- IPI_GET_FREQ for the A76s' PLL on its CPU DVFS
- * channel (sspm_query); its only writes are that message, its doorbell and, if an answer comes, the answer's bit
- * cleared. At the hand-back: if the message was not taken or an answer is still waiting, no Android this boot -- the
- * result stays on screen until the watchdog resets the phone (XNU_RETURN_WDT). */
-#ifndef SSPM_QUERY
-#define SSPM_QUERY          0
-#endif
-#if SSPM_QUERY && !DVFS_PROBE
-#error "SSPM_QUERY needs DVFS_PROBE"
 #endif
 /* 1 (MT6781): a run that starts SSPM's CPU DVFS (the kernel's MT6781_DVFS, dvfs_step=): at the hand-back no Android
  * this boot -- the log tail stays on screen until the watchdog resets the phone (XNU_RETURN_WDT), so Android starts
@@ -169,18 +135,6 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #define XNU_RETURN_AFTER    "0"
 #endif
 /* 1: always start XNU (tools/xnu-cycle.sh); 0: Android unless asked once (tools/boot-xnu.sh). */
-/* 1: look at the touch screen's SPI and report, then go back to Android (no XNU). */
-#ifndef TOUCH_PROBE
-#define TOUCH_PROBE         0
-#endif
-/* 1: wake the GPU and ask it what it is, if Android asked for it (tools/gpu-probe.sh); then Android. */
-#ifndef GPU_PROBE
-#define GPU_PROBE           0
-#endif
-/* 1: read the camera's pins, rails and I2C controller and report, if Android asked for it (tools/cam-probe.sh); then Android. */
-#ifndef CAM_PROBE
-#define CAM_PROBE           0
-#endif
 /* 1: read the keypad and the volume keys' GPIO word for 8 s and report what changes (hold the keys); then on as usual. */
 #ifndef KEY_PROBE
 #define KEY_PROBE           0
@@ -223,10 +177,6 @@ static void xnu_ufs_args(char *cl);
 #ifndef XNU_SHIM
 #define XNU_SHIM            0
 #endif
-/* 1: read the eMMC and report, then go back to Android (no XNU). */
-#ifndef MSDC_TEST
-#define MSDC_TEST           0
-#endif
 /* 1: check at EL1 that the timer interrupts arrive at all (diagnostics, leaves GIC state). */
 #ifndef TIMER_PROBE
 #define TIMER_PROBE         0
@@ -244,9 +194,6 @@ static void xnu_ufs_args(char *cl);
 /* 1 (with PASS_THROUGH): once, when Android asks (printf OPENMAPPLE:MARKER-TEST > /dev/pmsg0; reboot), put a
  * pattern in the marker and reset the board; the next boot says if it survived. How: 1 the watchdog as run_xnu
  * arms it, 2 PSCI SYSTEM_RESET, 3 the watchdog with DDR reserve on (MT6781: TOPRGU MODE bit 7). */
-#ifndef MARKER_TEST
-#define MARKER_TEST         0
-#endif
 #ifndef MENU_DEFAULT_XNU
 #define MENU_DEFAULT_XNU    0
 #endif
@@ -272,11 +219,7 @@ static void xnu_ufs_args(char *cl);
  * wired from the start, and three and a half minutes of every boot (run 320).
  */
 #ifndef XNU_ROOT_EMMC
-#if SOC_IS_MT6781
 #define XNU_ROOT_EMMC       0       /* no eMMC: the root is the payload's RAM disk */
-#else
-#define XNU_ROOT_EMMC       1
-#endif
 #endif
 /* 1 (MT6781, with XNU_UFS): the same on the UFS -- the system image in xnusys, read by the kernel (mtkufs_root=1,
  * mtk/mt6781/drivers/storage/mapple.mt6781_ufs.c); the payload's RAM disk stays md1. */
@@ -713,156 +656,6 @@ static uint64_t kva_to_pa(uint64_t va)
 }
 
 
-/* ---- the system image, on the flash ---- */
-
-/*
- * userland/system.packfs is the root XNU mounts (md0), 2.8 GB of it: too large for a boot image,
- * so it lives in its own partition (tools/gpt-carve.py made "xnusys" out of the end of userdata)
- * and is read into DRAM here. The payload's small root.packfs stays the second disk (md1).
- */
-static uint8_t gpt_entries[128 * 128] __attribute__((aligned(16)));
-static uint8_t sector_buf[512] __attribute__((aligned(16)));
-
-/* The partition's first block and length, by the name in the GPT. */
-static int gpt_find(const char *name, uint64_t *lba, uint64_t *blocks)
-{
-	if (!msdc_read(1, 1, sector_buf)) {
-		return 0;
-	}
-	if (memcmp_n(sector_buf, "EFI PART", 8)) {
-		return 0;
-	}
-	uint64_t ent_lba = *(volatile uint64_t *)(sector_buf + 72);
-	uint32_t count = *(volatile uint32_t *)(sector_buf + 80);
-	uint32_t size = *(volatile uint32_t *)(sector_buf + 84);
-
-	if (count > 128 || size != 128) {
-		return 0;
-	}
-	if (!msdc_read(ent_lba, count * size / 512, gpt_entries)) {
-		return 0;
-	}
-	for (uint32_t i = 0; i < count; i++) {
-		const uint8_t *e = gpt_entries + i * size;
-		int same = 1;
-
-		for (int k = 0; same && name[k - (k ? 0 : 0)] != 0; k++) {
-			same = e[56 + 2 * k] == (uint8_t)name[k] && e[57 + 2 * k] == 0;
-		}
-		if (same && e[56 + 2 * (int)strlen(name)] == 0) {
-			uint64_t first = *(const volatile uint64_t *)(e + 32);
-			uint64_t last = *(const volatile uint64_t *)(e + 40);
-			if (first == 0 || last < first) {
-				return 0;
-			}
-			*lba = first;
-			*blocks = last - first + 1;
-			return 1;
-		}
-	}
-	return 0;
-}
-
-/* Reads the image into SYSTEM_PA; returns its length, 0 if there is none to read. */
-static uint64_t load_system_image(void)
-{
-	uint64_t lba, blocks, size = 0, done = 0, t0 = dbg_ticks(), f = dbg_freq();
-
-	if (!gpt_find(SYSTEM_PART, &lba, &blocks)) {
-		out("no " SYSTEM_PART " partition on the flash (or the GPT could not be read)\n");
-		return 0;
-	}
-	out(SYSTEM_PART " at block ");
-	out_hex(lba);
-	out(", ");
-	out_dec(blocks / 2048);
-	out(" MB\n");
-
-	/*
-	 * APFS: a container's superblock is at its first block -- "NXSB" at offset 32, then the
-	 * block size and how many blocks it has. An image may hold several containers back to
-	 * back (the cryptexes come that way), so follow them until one does not begin with NXSB.
-	 */
-	for (uint64_t at = 0;;) {
-		if (!msdc_read(lba + at / 512, 1, sector_buf)) {
-			out("cannot read it: ");
-			out(msdc_last.what);
-			out("\n");
-			return 0;
-		}
-		if (*(volatile uint32_t *)(sector_buf + 32) != 0x4253584eu) { /* "NXSB" */
-			break;
-		}
-		uint32_t bs = *(volatile uint32_t *)(sector_buf + 36);
-		uint64_t count = *(volatile uint64_t *)(sector_buf + 40);
-
-		if (bs < 512 || bs > 65536 || count == 0 || count > blocks) {
-			out("the APFS container at ");
-			out_dec(at / 1024 / 1024);
-			out(" MB says ");
-			out_dec(count);
-			out(" blocks of ");
-			out_dec(bs);
-			out(": that cannot be\n");
-			return 0;
-		}
-		at += count * bs;
-		size = at;
-		if (at >= blocks * 512) {
-			break;
-		}
-	}
-	if (size == 0) {
-		out("no APFS container there (write userland/system.apfs to it)\n");
-		return 0;
-	}
-	out("APFS: ");
-	out_dec(size / 1024 / 1024);
-	out(" MB\n");
-	if (SYSTEM_MAX_MB && size > (uint64_t)SYSTEM_MAX_MB * 1024 * 1024) {
-		size = (uint64_t)SYSTEM_MAX_MB * 1024 * 1024;
-		out("(only the first ");
-		out_dec(SYSTEM_MAX_MB);
-		out(" MB of it, as built)\n");
-	}
-
-	out("reading ");
-	out_dec(size / 1024 / 1024);
-	out(" MB into ");
-	out_hex(SYSTEM_PA);
-	out(": ");
-	uint32_t last_shown = 0;
-	while (done < size) {
-		uint64_t left = (size - done + 511) / 512;
-		uint32_t n = left > 4096 ? 4096 : (uint32_t)left;   /* 2 MB at a time */
-
-		if (!msdc_read(lba + done / 512, n, (void *)(SYSTEM_PA + done))) {
-			out("\nfailed at ");
-			out_dec(done / 1024 / 1024);
-			out(" MB: ");
-			out(msdc_last.what);
-			out(" status ");
-			out_hex(msdc_last.status);
-			out("\n");
-			return 0;
-		}
-		done += (uint64_t)n * 512;
-		uint32_t pct = (uint32_t)(done * 100 / size);
-		if (pct >= last_shown + 10) {
-			last_shown = pct - pct % 10;
-			out_dec(last_shown);
-			out("% ");
-		}
-	}
-	uint64_t ms = (dbg_ticks() - t0) * 1000 / f;
-	out("done in ");
-	out_dec(ms / 1000);
-	out(" s (");
-	out_dec(size / 1024 / (ms ? ms : 1) * 1000 / 1024);
-	out(" MB/s)\n");
-	return size;
-}
-
 /* ---- device tree for XNU ---- */
 
 static void dt_prop(struct dt_writer *w, const char *name, const void *data, uint32_t len)
@@ -1142,9 +935,6 @@ static void __attribute__((noreturn)) reset_board(void)
 	wdt_reset();
 }
 
-#if TOUCH_PROBE
-static void touch_hand_back(void);
-#endif
 
 /* IMG, an arm64 Image, copied down to where LK puts a kernel and entered as LK enters one (x0: LK's tree). */
 static void __attribute__((noreturn)) chain_image(const volatile uint32_t *img, uint64_t image_size)
@@ -1172,9 +962,6 @@ static void __attribute__((noreturn)) chain_android(void)
 		dbg_delay_ms(3000);
 		reset_board();
 	}
-#if TOUCH_PROBE
-	touch_hand_back();
-#endif
 	out("starting Android\n");
 	chain_image(img, image_size);
 }
@@ -1807,7 +1594,7 @@ static uint32_t fdt_get(uint64_t at)
 }
 #endif
 
-#if ((DVFS_PROBE && XNU_PARK) || XNU_SHIM) && SOC_IS_MT6781
+#if XNU_SHIM && SOC_IS_MT6781
 /* where a property of a node just below the root of LK's tree is, or 0 */
 static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32_t *len)
 {
@@ -1856,7 +1643,7 @@ static uint64_t lk_prop(uint64_t dtb, const char *node, const char *prop, uint32
 }
 #endif
 
-#if ((DVFS_PROBE && XNU_PARK) || XNU_SHIM) && SOC_IS_MT6781
+#if XNU_SHIM && SOC_IS_MT6781
 static uint32_t mp_lvts_golden;                    /* 0: not known */
 
 /* " mp_lvts_golden=<n>" onto the kernel's command line, and the chip's speed bin (efuse word 7) said; the devinfo
@@ -2184,414 +1971,6 @@ static int say_parked(void)
 }
 #endif
 
-#if DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
-/* ---- the CPU clocks, only read (addresses and layout as MediaTek's MT6781 cpufreq driver has them) ---- */
-#define DVFS_CSRAM          0x0011bc00ULL       /* 5 KB SRAM: tables at +0x10, current OPP at +0x354, requests at +0x37c */
-
-/*
- * LK's table (rows of MHz, voltage step, post divider, clock divider) against the one Android left in the CSRAM, as
- * MediaTek's cpuhvfs_pvt_tbl_create lays it out: 16 words of voltage step << 16 | MHz, then 16 of clock divider << 16 |
- * post divider. MHz and dividers must agree; the voltages differ where EEM lowered them, so they are only shown.
- */
-static void table_check(const char *name, uint64_t data, uint32_t words, uint32_t csram)
-{
-	uint32_t rows = words / 4, same = 0;
-
-	for (uint32_t r = 0; r < rows && r < 16; r++) {
-		uint32_t mhz = fdt_get(data + 16 * r), post = fdt_get(data + 16 * r + 8), clk = fdt_get(data + 16 * r + 12);
-		uint32_t f = rd32(DVFS_CSRAM + csram + 4 * r), d = rd32(DVFS_CSRAM + csram + 4 * (16 + r));
-
-		if ((f & 0xffff) == mhz && d == ((clk & 0xff) << 16 | (post & 0xff))) {
-			same++;
-			continue;
-		}
-		out("dvfs: ");
-		out(name);
-		out(" row ");
-		out_dec(r);
-		out(" differs: LK ");
-		out_dec(mhz);
-		out(" MHz, dividers ");
-		out_dec(post);
-		out("/");
-		out_dec(clk);
-		out("; CSRAM ");
-		out_hex(f);
-		out(" ");
-		out_hex(d);
-		out("\n");
-	}
-	out("dvfs: ");
-	out(name);
-	out(" and the CSRAM's: ");
-	out_dec(same);
-	out(" of ");
-	out_dec(rows);
-	out(rows == 16 && same == 16 ? " rows agree (MHz, dividers)" : " rows agree (MHz, dividers): NOT the same table");
-	out("; voltage steps LK/CSRAM:");
-	for (uint32_t r = 0; r < rows && r < 16; r++) {
-		out(" ");
-		out_dec(fdt_get(data + 16 * r + 4));
-		out("/");
-		out_dec((rd32(DVFS_CSRAM + csram + 4 * r) >> 16) & 0xfff);
-	}
-	out("\n");
-}
-
-static void dvfs_probe(uint64_t dtb)
-{
-	static const struct {
-		const char *name;
-		uint64_t con1, div;
-	} pll[3] = {
-		{ "A55s (LL, ARMPLL_LL)", 0x1000c204, 0x0c53a2a0 },
-		{ "A76s (L, ARMPLL_L)", 0x1000c214, 0x0c53a2a4 },
-		{ "CCI (CCIPLL)", 0x1000c2a4, 0x0c53a2e0 },
-	};
-	static const char *const tables[] = { "L-table", "B-table", "CCI-table", "change_flag" };
-	static const uint32_t csram_at[] = { 0x10, 0xa0, 0x130 };       /* the A55s', the A76s', the CCI's */
-
-	for (int i = 0; i < 3; i++) {
-		uint32_t con1 = rd32(pll[i].con1), div = rd32(pll[i].div), post = (con1 >> 24) & 7, ckdiv = (div >> 17) & 0x1f;
-		uint64_t mhz = ((uint64_t)(con1 & 0x3fffff) * 26) >> 14;
-
-		mhz >>= post < 4 ? post : 4;
-		out("dvfs: ");
-		out(pll[i].name);
-		out(": CON1 ");
-		out_hex(con1);
-		out(" -> PLL ");
-		out_dec(mhz);
-		out(" MHz; divider ");
-		out_hex(div);
-		out(" (CKDIV1 ");
-		out_dec(ckdiv);
-		out(ckdiv == 8 || ckdiv == 16 || ckdiv == 24 ? ": none)\n" : ": divides)\n");
-	}
-
-	/* LK's tree: every property of dvfsp@0011bc00 named above, as words (rows of four: MHz, voltage step, post
-	 * divider, clock divider) */
-	uint64_t at = fdt_get(dtb + 8), end = at + fdt_get(dtb + 36), str = dtb + fdt_get(dtb + 12);
-	int depth = 0, inside = 0, found = 0;
-
-	while (fdt_get(dtb) == 0xd00dfeedu && at < end) {
-		uint32_t tok = fdt_get(dtb + at);
-
-		at += 4;
-		if (tok == FDT_BEGIN_NODE) {
-			static const char node[] = "dvfsp@0011bc00";
-			uint64_t n = 0;
-
-			while (((const volatile char *)dtb)[at + n]) {
-				n++;
-			}
-			depth++;
-			if (depth == 2 && n == sizeof(node) - 1 && memcmp_n((const volatile char *)dtb + at, node, n) == 0) {
-				inside = 1;
-			}
-			at += (n + 1 + 3) & ~3ULL;
-		} else if (tok == FDT_END_NODE) {
-			if (inside && depth == 2) {
-				break;
-			}
-			depth--;
-		} else if (tok == FDT_PROP) {
-			uint32_t len = fdt_get(dtb + at), nameoff = fdt_get(dtb + at + 4);
-
-			for (int t = 0; inside && t < 4; t++) {
-				uint64_t n = 0;
-
-				while (tables[t][n]) {
-					n++;
-				}
-				if (memcmp_n((const volatile char *)str + nameoff, tables[t], n + 1) != 0) {
-					continue;
-				}
-				found++;
-				out("dvfs: LK's ");
-				out(tables[t]);
-				out(":");
-				for (uint32_t w = 0; w < len / 4; w++) {
-					out(w % 4 == 0 ? (w % 16 == 0 ? "\n  " : "  |") : " ");
-					out_dec(fdt_get(dtb + at + 8 + 4 * w));
-				}
-				out("\n");
-				if (t < 3) {
-					table_check(tables[t], dtb + at + 8, len / 4, csram_at[t]);
-				}
-			}
-			at += 8 + ((len + 3) & ~3u);
-		} else if (tok != FDT_NOP) {
-			break;
-		}
-	}
-	if (!found) {
-		out("dvfs: no dvfsp@0011bc00 tables in LK's device tree\n");
-	}
-
-	/* the CSRAM's first 0x3a0 bytes: tables, data, current Vproc (+0x32c), current OPP (+0x354), requests (+0x37c) */
-	for (uint32_t o = 0; o < 0x3a0; o += 32) {
-		out("dvfs: CSRAM +");
-		out_hex(o);
-		out(":");
-		for (uint32_t w = 0; w < 32; w += 4) {
-			out(" ");
-			out_hex(rd32(DVFS_CSRAM + o + w));
-		}
-		out("\n");
-	}
-}
-
-/*
- * Whether SSPM runs while XNU does: its memory looked at before XNU and again at the hand-back -- the whole CSRAM and
- * its DVFS log (which SSPM writes, +0x3d0..+0xf68), each of SSPM's five mailboxes (0x100 each; mailbox 0's slots 26..29
- * carry the CPU DVFS commands, IPI channel 5), its SRAM in five pieces, and its semaphore register -- as hashes, with the
- * words that say the DVFS state (+0x320..+0x39f) in full. Only read, of what Android itself maps.
- */
-#define SSPM_SRAM           0x10400000ULL       /* 0x28000 */
-#define SSPM_CFGREG         0x10440000ULL       /* semaphore at +0x48 */
-#define SSPM_MBOX(n)        (0x10450000ULL + 0x10000ULL * (n))
-
-static uint32_t words_hash(uint64_t at, uint32_t bytes)
-{
-	uint32_t h = 2166136261u;                   /* FNV-1a over 32-bit words */
-
-	for (uint32_t o = 0; o < bytes; o += 4) {
-		h = (h ^ rd32(at + o)) * 16777619u;
-	}
-	return h;
-}
-
-static void sspm_watch(const char *when)
-{
-	out("sspm (");
-	out(when);
-	out("): CSRAM ");
-	out_hex(words_hash(DVFS_CSRAM, 0x1400));
-	out(", its DVFS log ");
-	out_hex(words_hash(DVFS_CSRAM + 0x3d0, 0xf68 - 0x3d0));
-	out("; mailboxes");
-	for (int n = 0; n < 5; n++) {
-		out(" ");
-		out_hex(words_hash(SSPM_MBOX(n), 0x100));
-	}
-	out("; SRAM");
-	for (uint32_t o = 0; o < 0x28000; o += 0x8000) {
-		out(" ");
-		out_hex(words_hash(SSPM_SRAM + o, 0x8000));
-	}
-	out("; semaphore ");
-	out_hex(rd32(SSPM_CFGREG + 0x48));
-	out("\nsspm (");
-	out(when);
-	out("): mailbox 0 slots 26..29 (CPU DVFS):");
-	for (uint32_t k = 26; k < 30; k++) {
-		out(" ");
-		out_hex(rd32(SSPM_MBOX(0) + 4 * k));
-	}
-	out("\nsspm (");
-	out(when);
-	out("): mailbox 0 set ");
-	out_hex(rd32(SSPM_MBOX(0) + 0x1000));
-	out(", mailbox 2 clear ");
-	out_hex(rd32(SSPM_MBOX(2) + 0x1004));
-	out("\nsspm (");
-	out(when);
-	out("): CSRAM +0x320:");
-	for (uint32_t o = 0x320; o < 0x3a0; o += 4) {
-		out(" ");
-		out_hex(rd32(DVFS_CSRAM + o));
-	}
-	out("\n");
-}
-
-/*
- * The CPU temperature, only read, as MediaTek's thermal driver reads it: nine LVTS sensors on three controllers
- * (0x1100b000: the A55s' three and the camera's; +0x100: the A76s' two; +0x200: the modem's and the GPU's two), each
- * result at +0x90 + 4 * n (bits 15..0; bit 16 valid), in m°C (-204650 * raw >> 14) + golden * 500 + 204650. golden is
- * the low byte of the chip's efuse word 112, which LK gives Linux in /chosen "atag,devinfo" (a count, then the words
- * get_devinfo_with_index() reads). They count only once SSPM runs them (Linux asks it to); otherwise they read 0 or
- * stand still. Their clock is infra_therm (infracfg_ao +0x90 bit 10 set: gated); while it is off they are not read.
- * lvts_args passes golden to the kernel's reader (mapple.mt6781_lvts.c).
- */
-#define LVTS_BASE           0x1100b000ULL
-#define INFRA_CG0_STA       0x10001090ULL
-#define INFRA_THERM_CG      (1u << 10)
-
-
-
-
-
-static void lvts_show(const char *when)
-{
-	static const char *const what[3] = { "A55s x3, camera", "A76s x2", "modem, GPU x2" };
-	static const uint32_t sensors[3] = { 4, 2, 3 };
-
-	if (rd32(INFRA_CG0_STA) & INFRA_THERM_CG) {
-		out("lvts (");
-		out(when);
-		out("): the thermal controller's clock is gated (infracfg_ao +0x90 ");
-		out_hex(rd32(INFRA_CG0_STA));
-		out("): not read\n");
-		return;
-	}
-	for (uint32_t c = 0; c < 3; c++) {
-		uint64_t base = LVTS_BASE + 0x100 * c;
-
-		out("lvts (");
-		out(when);
-		out("): ");
-		out(what[c]);
-		out(": MONCTL0 ");
-		out_hex(rd32(base));
-		out(", CONFIG ");
-		out_hex(rd32(base + 0x50));
-		for (uint32_t n = 0; n < sensors[c]; n++) {
-			uint32_t raw = rd32(base + 0x90 + 4 * n);
-			int64_t mc = ((-204650LL * (raw & 0xffff)) >> 14) + 500LL * mp_lvts_golden + 204650;
-
-			out(n ? "; " : ": ");
-			out_hex(raw);
-			if ((raw & 0xffff) == 0 || mp_lvts_golden == 0) {
-				continue;
-			}
-			out(" = ");
-			if (mc < 0) {
-				out("-");
-				mc = -mc;
-			}
-			out_dec((uint64_t)mc / 1000);
-			out_putc('.');
-			out_dec((uint64_t)mc % 1000 / 100);
-			out(" C");
-			if (!(raw & 0x10000)) {
-				out(" (not valid)");
-			}
-		}
-		out("\n");
-	}
-}
-
-#if SSPM_QUERY
-/*
- * The CPU DVFS channel (IPIS_C_GPU_DVFS, 5, as the vendor's hybrid DVFS driver uses it with SSPM v2): its message in
- * mailbox 0 at slot 26 (4 words: command, three arguments), rung by bit 26 of mailbox 0's set register; the answer in
- * mailbox 2 at slot 24 (1 word), raised as bit 24 of mailbox 2's clear register, cleared there by writing it.
- * IPI_GET_FREQ is 6 with CONFIG_MTK_CPU_MSSV (this phone's kernel); its argument the PLL, 1 = PLL_L_CLUSTER, the A76s.
- */
-#define SSPM_SEND_BIT       (1u << 26)
-#define SSPM_REPLY_BIT      (1u << 24)
-#define IPI_GET_FREQ        6
-#define PLL_L_CLUSTER       1
-
-static char sspm_result[160] = "sspm: no question asked";
-
-static void sspm_note(const char *s)
-{
-	uint32_t n = 0;
-
-	while (sspm_result[n]) {
-		n++;
-	}
-	while (*s && n + 1 < sizeof(sspm_result)) {
-		sspm_result[n++] = *s++;
-	}
-	sspm_result[n] = 0;
-}
-
-static void sspm_note_dec(uint64_t v)
-{
-	char d[24], c[2] = { 0, 0 };
-	int n = 0;
-
-	do {
-		d[n++] = (char)('0' + v % 10);
-		v /= 10;
-	} while (v);
-	while (n) {
-		c[0] = d[--n];
-		sspm_note(c);
-	}
-}
-
-static void sspm_query(void)
-{
-	uint64_t set0 = SSPM_MBOX(0) + 0x1000, clr2 = SSPM_MBOX(2) + 0x1004, msg = SSPM_MBOX(0) + 4 * 26;
-	uint64_t t0, us_take, us_reply = 0, per_us = dbg_freq() / 1000000;
-	uint32_t s0 = rd32(set0), c2 = rd32(clr2), reply = 0;
-	int taken, answered = 0;
-
-	if (per_us == 0) {
-		per_us = 1;
-	}
-	sspm_result[0] = 0;
-	out("sspm: IPI_GET_FREQ (PLL 1, the A76s) on the CPU DVFS channel: mailbox 0 set ");
-	out_hex(s0);
-	out(", mailbox 2 clear ");
-	out_hex(c2);
-	out(" before\n");
-	if ((s0 & SSPM_SEND_BIT) || (c2 & SSPM_REPLY_BIT)) {
-		sspm_note("sspm: NOT SENT: the channel was busy before (bit 26 or 24 already set)");
-		out(sspm_result);
-		out("\n");
-		return;
-	}
-	wr32(msg, IPI_GET_FREQ);
-	wr32(msg + 4, PLL_L_CLUSTER);
-	wr32(msg + 8, 0);
-	wr32(msg + 12, 0);
-	__asm__ volatile("dsb sy");
-	wr32(set0, SSPM_SEND_BIT);
-	t0 = dbg_ticks();
-	while ((rd32(set0) & SSPM_SEND_BIT) && dbg_ticks() - t0 < 100000 * per_us) {
-		dbg_delay_us(10);
-	}
-	us_take = (dbg_ticks() - t0) / per_us;
-	taken = !(rd32(set0) & SSPM_SEND_BIT);
-	if (taken) {
-		t0 = dbg_ticks();
-		while (!(rd32(clr2) & SSPM_REPLY_BIT) && dbg_ticks() - t0 < 2000000 * per_us) {
-			dbg_delay_us(10);
-		}
-		us_reply = (dbg_ticks() - t0) / per_us;
-		if (rd32(clr2) & SSPM_REPLY_BIT) {
-			wr32(clr2, SSPM_REPLY_BIT);     /* as the vendor's polling does: the bit cleared, then the word read */
-			reply = rd32(SSPM_MBOX(2) + 4 * 24);
-			answered = 1;
-		}
-	}
-	if (!taken) {
-		sspm_note("sspm: NOT TAKEN in 100 ms (bit 26 still set): SSPM is not taking messages");
-	} else if (!answered) {
-		sspm_note("sspm: taken after ");
-		sspm_note_dec(us_take);
-		sspm_note(" us, NO ANSWER in 2000 ms: SSPM alive, this question not answered");
-	} else {
-		sspm_note("sspm: taken after ");
-		sspm_note_dec(us_take);
-		sspm_note(" us, answered after ");
-		sspm_note_dec(us_reply);
-		sspm_note(" us: ");
-		sspm_note_dec(reply);
-		sspm_note(" (our PLL read: 1084 MHz)");
-	}
-	out(sspm_result);
-	out("\nsspm: the answer word ");
-	out_hex(reply);
-	out("; mailbox 0 set ");
-	out_hex(rd32(set0));
-	out(", mailbox 2 clear ");
-	out_hex(rd32(clr2));
-	out(" after\n");
-}
-
-/* at the hand-back: the channel as Android must find it -- nothing waiting either way */
-static int sspm_channel_clean(void)
-{
-	return !(rd32(SSPM_MBOX(0) + 0x1000) & SSPM_SEND_BIT) && !(rd32(SSPM_MBOX(2) + 0x1004) & SSPM_REPLY_BIT);
-}
-#endif
-#endif
 
 #if RETURN_CPUS
 /* PSCI AFFINITY_INFO (SMC64): 0 on, 1 off, 2 turning on, negative an error */
@@ -2693,13 +2072,9 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 	dbg_puts("=== end of XNU log ===\n");
 	save_host_keep(&xsyms);
 	show_log_tail(40);
-#if DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
-	lvts_show("at the hand-back");
-	sspm_watch("at the hand-back");
-#endif
 	if (SOC_IS_MT6781) {
 		/*
-		 * No reset: no DRAM survives one on the MT6781 (MARKER_TEST), so Android starts in this boot,
+		 * No reset: no DRAM survives one on the MT6781, so Android starts in this boot,
 		 * over the log just put in ramoops. XNU's loader_return left the other cores off, its shared interrupts
 		 * disabled, and the stub the MMU and caches off. What XNU quiets only with bootcpu= is done here: its
 		 * timer, the redistributors of the cores it had, and this core's CPU interface.
@@ -2772,21 +2147,6 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 		dbg_delay_ms(10000);
 #else
 		dbg_delay_ms(5000);
-#endif
-#if SSPM_QUERY && DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
-		out(sspm_result);
-		out("\n");
-		if (!sspm_channel_clean()) {
-			out("sspm: the CPU DVFS channel is not clear (mailbox 0 set ");
-			out_hex(rd32(SSPM_MBOX(0) + 0x1000));
-			out(", mailbox 2 clear ");
-			out_hex(rd32(SSPM_MBOX(2) + 0x1004));
-			out("): no Android this boot -- the watchdog resets the phone (XNU_RETURN_WDT)\n");
-			for (;;) {
-				dbg_delay_ms(1000);
-			}
-		}
-		out("sspm: the CPU DVFS channel is clear: Android as usual\n");
 #endif
 #if DVFS_RESET_END && SOC_IS_MT6781
 		out("dvfs: DVFS_RESET_END: SSPM's CPU DVFS was started this boot: no Android now -- the watchdog resets the "
@@ -3496,10 +2856,8 @@ static void __attribute__((noreturn)) run_shim(void)
 		end += 32 + 16 + ili_blocks[i].len + 16;
 	}
 #endif
-#if SOC_IS_MT6781
 	uint64_t tbl = (end + 15) & ~15ULL;     /* LK's OPP tables, after the most the touch firmware can take */
 	end = tbl + DVFS_TBL_WORDS * 4;
-#endif
 	out("shim ");
 	out_dec(pi.shim_size);
 	out(" bytes, MAPPLEPL ");
@@ -3522,10 +2880,8 @@ static void __attribute__((noreturn)) run_shim(void)
 		ili_xnu_args((char *)(rd + PAYLOAD_XNU_CMDLINE), fw);
 	}
 #endif
-#if SOC_IS_MT6781
 	lvts_args((char *)(rd + PAYLOAD_XNU_CMDLINE));     /* this phone's thermal calibration, for viva's LVTS code */
 	dvfs_args((char *)(rd + PAYLOAD_XNU_CMDLINE), (uint32_t *)tbl);
-#endif
 
 	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
 	display_find();
@@ -3695,8 +3051,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 		memset((void *)rd_pa, 0, rd_size);
 		memcpy((void *)rd_pa, pi.ramdisk, pi.ramdisk_size);
 	}
-	/* and the big one off the flash, if it is there (with XNU_ROOT_EMMC the kernel reads it itself) */
-	uint64_t sys_size = XNU_ROOT_EMMC || SOC_IS_MT6781 ? 0 : load_system_image();   /* MT6781: MSDC0 is the Hot 20's */
+	uint64_t sys_size = 0;
 	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
 	uint64_t sys_span = (sys_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 
@@ -3750,10 +3105,6 @@ static void __attribute__((noreturn)) run_xnu(void)
 #endif
 #if XNU_PARK && SOC_IS_MT6781
 	xnu_park_setup(ba->commandLine);
-#endif
-#if DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
-	lvts_args(ba->commandLine);
-	dvfs_args(ba->commandLine, mp_dvfs_tbl);
 #endif
 
 	out("md0 ");
@@ -3820,15 +3171,6 @@ static void __attribute__((noreturn)) run_xnu(void)
 			out("a speed its cycle counter will not say\n");
 		}
 	}
-#if DVFS_PROBE && XNU_PARK && SOC_IS_MT6781
-	dvfs_probe(lk_dtb);
-	lvts_show("before XNU");
-	sspm_watch("before XNU");
-#if SSPM_QUERY
-	sspm_query();
-	sspm_watch("after the question");
-#endif
-#endif
 
 	/* must happen on the core the kernel runs on, and before it sets its GIC up */
 	gic_fix_eoimode();
@@ -3867,568 +3209,8 @@ static void __attribute__((noreturn)) run_xnu(void)
 	__builtin_unreachable();
 }
 
-#if MSDC_TEST
-/*
- * Can we read the phone's eMMC with what LK left set up? Checked against bytes we know: the GPT
- * header at block 1 ("EFI PART") and the start of boot_a, which holds the image this very
- * program came from ("ANDROID!"). Reads only.
- */
-static void msdc_dump(const char *name, uint64_t lba, const uint8_t *b, int ok)
-{
-	out(name);
-	out(" lba ");
-	out_hex(lba);
-	if (!ok) {
-		out(": FAILED at ");
-		out(msdc_last.what);
-		out(", status ");
-		out_hex(msdc_last.status);
-		out("\n");
-		return;
-	}
-	out(": ");
-	for (int i = 0; i < 16; i++) {
-		out_hex(b[i]);
-		out_putc(' ');
-	}
-	out(" |");
-	for (int i = 0; i < 24; i++) {
-		out_putc(b[i] >= 0x20 && b[i] < 0x7f ? (char)b[i] : '.');
-	}
-	out("|\n");
-}
-
-/*
- * The SD card slot (MSDC1). LK never touches it, so its clock may be gated and the card
- * unpowered (vmmc = MT6358 VMCH, vqmmc = ldo_vmc, both over PWRAP). This only looks: it reads
- * MSDC1's registers and tries the first commands of the SD sequence. If the card answers, the
- * rails and clocks are already on and no PMIC work is needed; if nothing answers, they are not.
- */
-static void msdc1_probe(void)
-{
-	uint32_t resp;
-	int ok;
-
-	msdc_base = MSDC1_BASE;
-	out("\nSD slot (MSDC1) as LK leaves it: CFG ");
-	out_hex(rd32(MSDC1_BASE + MSDC_CFG));
-	out(" PS ");
-	out_hex(rd32(MSDC1_BASE + MSDC_PS));
-	out(" SDC_CFG ");
-	out_hex(rd32(MSDC1_BASE + SDC_CFG));
-	out(" STS ");
-	out_hex(rd32(MSDC1_BASE + SDC_STS));
-	out(" INT ");
-	out_hex(rd32(MSDC1_BASE + MSDC_INT));
-	out("\n");
-	if (rd32(MSDC1_BASE + MSDC_CFG) == 0 && rd32(MSDC1_BASE + MSDC_PS) == 0) {
-		out("  all zero: the controller looks unclocked\n");
-	}
-
-	/* CMD0 (go idle, no answer), then CMD8 (which voltages do you take, R7) */
-	wr32(MSDC1_BASE + MSDC_INT, rd32(MSDC1_BASE + MSDC_INT));
-	msdc_int_seen = 0;
-	wr32(MSDC1_BASE + SDC_ARG, 0);
-	wr32(MSDC1_BASE + SDC_CMD, CMD_OPC(0));
-	msdc_wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "CMD0");
-	dbg_delay_ms(10);
-
-	wr32(MSDC1_BASE + SDC_ARG, 0x1aa);
-	wr32(MSDC1_BASE + SDC_CMD, CMD_OPC(8) | CMD_RSP_R1);
-	ok = msdc_wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "CMD8");
-	resp = rd32(MSDC1_BASE + SDC_RESP0);
-	out("  CMD8 (interface condition): ");
-	if (ok) {
-		out("answered ");
-		out_hex(resp);
-		out(resp == 0x1aa ? " -- an SD card is powered and listening" : "");
-	} else {
-		out("no answer (");
-		out(msdc_last.what);
-		out(", status ");
-		out_hex(msdc_last.status);
-		out(") -- the slot needs its clock and power set up");
-	}
-	out("\n");
-	msdc_base = MSDC0_BASE;
-}
-
-static void msdc_self_test(void)
-{
-	static uint8_t buf[4096] __attribute__((aligned(16)));
-	const uint64_t boot_a_lba = 0xf5000; /* from LK's partition table */
-	int ok;
-
-	/* a hang in here must not keep the phone: the watchdog brings Android back */
-	wr32(TOPRGU_LENGTH, ((31u * 32768u / 512u) << 5) | 0x8u);
-	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | 0x1u);
-
-	out("eMMC (MSDC0) as LK left it: CFG ");
-	out_hex(rd32(MSDC0_BASE + MSDC_CFG));
-	out(" PS ");
-	out_hex(rd32(MSDC0_BASE + MSDC_PS));
-	out(" SDC_CFG ");
-	out_hex(rd32(MSDC0_BASE + SDC_CFG));
-	out(" STS ");
-	out_hex(rd32(MSDC0_BASE + SDC_STS));
-	out(" INT ");
-	out_hex(rd32(MSDC0_BASE + MSDC_INT));
-	out("\n");
-
-	/* the card's state, before touching the data lines at all */
-	if (msdc_wait_idle()) {
-		wr32(MSDC0_BASE + MSDC_INT, rd32(MSDC0_BASE + MSDC_INT));
-		wr32(MSDC0_BASE + SDC_ARG, 1u << 16); /* RCA 1, as LK sets it */
-		wr32(MSDC0_BASE + SDC_CMD, CMD_OPC(MMC_SEND_STATUS) | CMD_RSP_R1);
-		ok = msdc_wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "status");
-		out("CMD13 (card status): ");
-		if (ok) {
-			out_hex(rd32(MSDC0_BASE + SDC_RESP0));
-		} else {
-			out("failed at ");
-			out(msdc_last.what);
-			out(" status ");
-			out_hex(msdc_last.status);
-		}
-		out("\n");
-	}
-
-	memset(buf, 0, sizeof(buf));
-	ok = msdc_read(1, 1, buf);
-	msdc_dump("GPT header ", 1, buf, ok);
-
-	memset(buf, 0, sizeof(buf));
-	ok = msdc_read(boot_a_lba, 1, buf);
-	msdc_dump("boot_a     ", boot_a_lba, buf, ok);
-
-	memset(buf, 0, sizeof(buf));
-	ok = msdc_read(boot_a_lba, 8, buf);
-	out("boot_a 8 blocks: ");
-	if (ok) {
-		uint32_t ksize = *(volatile uint32_t *)(buf + 8);
-		out(buf[0] == 'A' ? "ANDROID! kernel_size " : "NOT a boot image, ");
-		out_hex(ksize);
-		out(", block 7 starts ");
-		for (int i = 0; i < 8; i++) {
-			out_hex(buf[7 * 512 + i]);
-			out_putc(' ');
-		}
-	} else {
-		out("FAILED at ");
-		out(msdc_last.what);
-		out(" status ");
-		out_hex(msdc_last.status);
-	}
-	out("\n");
-
-	/* How fast, how far, and is what comes back right: a checksum of 4 MB of boot_a, which
-	 * is the image this program was flashed in, so the host can check it (tools/msdc-test.sh). */
-	for (uint32_t blocks = 256; blocks <= 8192; blocks *= 4) {
-		const uint64_t at = 0xa0000000ULL;
-		uint64_t total = 4u * 1024 * 1024, t0, t1, f = dbg_freq();
-		uint32_t rounds = (uint32_t)(total / (blocks * 512));
-		uint32_t sum = 0;
-		int fine = 1;
-
-		t0 = dbg_ticks();
-		for (uint32_t r = 0; r < rounds && fine; r++) {
-			fine = msdc_read(boot_a_lba + (uint64_t)r * blocks, blocks, (void *)at);
-			for (uint32_t i = 0; fine && i < blocks * 512 / 4; i++) {
-				sum = sum * 31u + *(volatile uint32_t *)(at + 4 * i);
-			}
-		}
-		t1 = dbg_ticks();
-		out("read 4 MB in ");
-		out_dec(blocks);
-		out("-block chunks: ");
-		if (!fine) {
-			out("FAILED at ");
-			out(msdc_last.what);
-			out(" status ");
-			out_hex(msdc_last.status);
-		} else {
-			out_dec((t1 - t0) * 1000 / f);
-			out(" ms, ");
-			out_dec(total * f / ((t1 - t0) ? (t1 - t0) : 1) / 1024 / 1024);
-			out(" MB/s (the checksum takes part of that), sum ");
-			out_hex(sum);
-		}
-		out("\n");
-	}
-	msdc1_probe();
-}
-#endif /* MSDC_TEST */
 
 
-#if TOUCH_PROBE
-/*
- * Room for the firmware and the fourteen header bytes in front of it: plain DRAM that nothing
- * else keeps. The loader's image ends before 0x400c0000, XNU's log ring sits at 0x47b1c9c0 and
- * ramoops at 0x4d0e0000, and DRAM reaches well past this. Growing the loader instead would walk
- * it into the 256 KB chainboot gives it.
- */
-
-/* What an identify report says about itself: the mode it is in, which part it is, which build. */
-static void touch_say_identify(const uint8_t *buf, uint32_t got)
-{
-	if (got < 2) {
-		out("  too short to say anything\n");
-		return;
-	}
-	out("  mode ");
-	out_hex(buf[1]);
-	out(" (");
-	out(buf[1] == TCM_MODE_ROMBOOT ? "the ROM bootloader, no firmware" :
-	    buf[1] == TCM_MODE_HOSTDOWNLOAD ? "running what it was given" :
-	    buf[1] == TCM_MODE_APPLICATION ? "running its application" : "something else");
-	out("), part ");
-	for (uint32_t i = 2; i < got && i < 18; i++) {
-		out_putc(buf[i] >= 0x20 && buf[i] < 0x7f ? (char)buf[i] : ' ');
-	}
-	if (got >= 22) {
-		out(", build ");
-		out_hex((uint32_t)buf[18] | ((uint32_t)buf[19] << 8) |
-		    ((uint32_t)buf[20] << 16) | ((uint32_t)buf[21] << 24));
-	}
-	out("\n");
-}
-
-/*
- * Wait for the chip to speak, and only then listen.
- *
- * After the go command the chip restarts into the firmware and introduces itself unasked, so
- * there is nothing to ask for and nothing to gain by clocking at it meanwhile -- reading a chip
- * that is not ready only puts its SPI side out of step. So this watches the interrupt line and
- * reads one message each time it goes low, printing whatever comes, until an identify report
- * arrives or the patience runs out. Returns the mode it found, or 0.
- */
-static uint8_t touch_wait_identify(uint32_t patience_ms)
-{
-	static uint8_t buf[320];
-	uint8_t code = 0;
-	uint32_t got = 0, waited = 0;
-	int heard = 0;
-
-	while (waited < patience_ms) {
-		if (!tcm_irq()) {
-			dbg_delay_ms(10);
-			waited += 10;
-			continue;
-		}
-		heard = 1;
-		out("  after ");
-		out_hex(waited);
-		out(" ms: ");
-		if (tcm_read(&code, buf, sizeof(buf), &got) != 1) {
-			out("the interrupt was up but the message was not readable (");
-			out_hex(code);
-			out(")\n");
-			dbg_delay_ms(20);
-			waited += 20;
-			continue;
-		}
-		out("code ");
-		out_hex(code);
-		out(", ");
-		out_hex(got);
-		out(" bytes\n");
-		if (code == TCM_REPORT_IDENTIFY) {
-			touch_say_identify(buf, got);
-			return got >= 2 ? buf[1] : 0;
-		}
-	}
-	out(heard ? "  nothing more\n" : "  the interrupt line never went low\n");
-	return 0;
-}
-
-/*
- * Bits out of a touch report, least significant first within each byte and on across the bytes,
- * which is how the chip packs them (touch_get_report_data in the driver).
- */
-static uint32_t touch_bits(const uint8_t *buf, uint32_t at, uint32_t bits)
-{
-	uint32_t v = 0;
-
-	for (uint32_t i = 0; i < bits; i++) {
-		uint32_t bit = at + i;
-
-		v |= (uint32_t)((buf[bit / 8] >> (bit % 8)) & 1u) << i;
-	}
-	return v;
-}
-
-/*
- * What a touch report holds, from the layout the chip itself describes when asked with 0x25:
- *
- *   0x0f 0x01   the capacitive buttons, one bit
- *   0x04        pad to the next byte, so the first byte is theirs alone
- *   0x01        and then, for each finger it can see:
- *   0x06 0x04     which finger      4 bits
- *   0x07 0x04     what it is        4 bits (0 lifted, 1 a finger, 2 a gloved one)
- *   0x08 0x0c     x                12 bits
- *   0x09 0x0c     y                12 bits
- *   0x0a 0x08     pressure          8 bits
- *   0x0b 0x08     width across      8 bits
- *   0x0c 0x08     width down        8 bits
- *   0x0d 0x10     column            16 bits
- *   0x0e 0x10     row               16 bits
- *   0x03 0x00   end of the list, end of the layout
- *
- * Eighty-eight bits a finger, and the report is as long as it has fingers to talk about.
- */
-#define TOUCH_FINGER_BITS   88
-
-static int touch_say_report(const uint8_t *buf, uint32_t got)
-{
-	uint32_t at = 8;                                /* the button byte comes first */
-	int fingers = 0;
-
-	while (at + TOUCH_FINGER_BITS <= got * 8) {
-		uint32_t which = touch_bits(buf, at, 4);
-		uint32_t kind = touch_bits(buf, at + 4, 4);
-		uint32_t x = touch_bits(buf, at + 8, 12);
-		uint32_t y = touch_bits(buf, at + 20, 12);
-		uint32_t pressure = touch_bits(buf, at + 32, 8);
-
-		at += TOUCH_FINGER_BITS;
-		if (kind == 0) {
-			continue;                       /* that finger has lifted */
-		}
-		out("  finger ");
-		out_hex(which);
-		out(" at ");
-		out_hex(x);
-		out(",");
-		out_hex(y);
-		out(" pressure ");
-		out_hex(pressure);
-		out("\n");
-		fingers++;
-	}
-	return fingers;
-}
-
-/*
- * Is the touch screen reachable from here, and can it be made to run? The controller keeps its
- * firmware in RAM and loses it at every reset, so Android sends it afresh at every boot and so
- * must we. This walks that same sequence, printing what the chip says at each step: reset into
- * the ROM bootloader, the image as one message, the pause, the go command, and then listen until
- * it introduces itself with the mode it reached.
- */
-static void touch_probe(void)
-{
-	static uint8_t buf[320];
-	uint8_t code = 0, mode;
-	uint32_t got = 0;
-	int r;
-
-	/*
-	 * The clock gates of the infra bus (Linux clk-mt6768.c): a bit set in a status register
-	 * means that clock is held off. SPI2's is one of them, so open all four registers' worth --
-	 * opening a gate only lets a clock run, it tells nothing to do anything.
-	 */
-	static const uint32_t gate_clr[4] = { 0x8c, 0xa8, 0xc4, 0x84 };
-
-	for (int i = 0; i < 4; i++) {
-		wr32(INFRACFG_BASE + gate_clr[i], 0xffffffffu);
-	}
-	__asm__ volatile("dsb sy");
-	touch_clk_cfg2 = rd32(TOPCKGEN_BASE + CLK_CFG_2);
-	touch_clk_cfg2_seen = 1;
-	spi_pins_to_spi2();
-	spi_setup();
-	out("\nSPI2: pins ");
-	out_hex(rd32(GPIO_BASE + GPIO_MODE3));
-	out(", clock mux ");
-	out_hex(rd32(TOPCKGEN_BASE + CLK_CFG_2));
-	out(", interrupt ");
-	out(tcm_irq() ? "asserted\n" : "idle\n");
-
-	/*
-	 * A reset first, so the chip is where the sequence expects it however the reboot left it,
-	 * and it answers a reset by introducing itself.
-	 */
-	tcm_reset();
-	r = tcm_read_patiently(&code, buf, sizeof(buf), &got);
-	if (r != 1) {
-		out("nothing after a reset (");
-		out_hex(code);
-		out(")\n");
-		return;
-	}
-	out("after a reset: code ");
-	out_hex(code);
-	out("\n");
-	touch_say_identify(buf, got);
-	if (got < 2 || buf[1] != TCM_MODE_ROMBOOT) {
-		out("not the ROM bootloader, so there is nothing to send\n");
-		return;
-	}
-
-	/*
-	 * The message, laid out whole in DRAM so it can go out in one breath: the command, its two
-	 * length bytes, the fourteen of header, and the image. Read it back afterwards, because an
-	 * address that is not really ours would turn the download into noise.
-	 */
-	uint8_t *message = (uint8_t *)TOUCH_STAGE;
-	uint32_t total = TCM_MESSAGE_HEAD + TCM_ROMBOOT_HEADER + TOUCH_FW_SIZE, bad = 0;
-
-	memcpy(message + TCM_MESSAGE_HEAD + TCM_ROMBOOT_HEADER, touch_fw, TOUCH_FW_SIZE);
-	for (uint32_t i = 0; i < TOUCH_FW_SIZE; i++) {
-		if (message[TCM_MESSAGE_HEAD + TCM_ROMBOOT_HEADER + i] != touch_fw[i]) {
-			bad++;
-		}
-	}
-	if (bad) {
-		out("the staged image came back wrong in ");
-		out_hex(bad);
-		out(" bytes, so that DRAM is not ours\n");
-		return;
-	}
-
-	out("sending ");
-	out_hex(total);
-	out(" bytes in one transfer\n");
-	tcm_load_firmware(message);
-	r = tcm_read_patiently(&code, buf, sizeof(buf), &got);
-	out("  answered ");
-	if (r == 1) {
-		out_hex(code);
-		out(code == TCM_STATUS_OK ? " (taken)" : " (not a plain yes)");
-		out(", ");
-		out_hex(got);
-		out(" bytes:");
-		for (uint32_t k = 0; k < got && k < 8; k++) {
-			out_putc(' ');
-			out_hex(buf[k]);
-		}
-		if (code == TCM_STATUS_OK && got >= 2) {
-			out(", blocks written ");
-			out_hex((uint32_t)buf[0] | ((uint32_t)buf[1] << 8));
-			out(" of ");
-			out_hex(TOUCH_FW_SIZE / 16);
-		}
-	} else {
-		out("nothing");
-	}
-	out("\n");
-
-	out("go: ");
-	tcm_run_firmware();
-	mode = touch_wait_identify(3000);
-	if (mode == TCM_MODE_APPLICATION || mode == TCM_MODE_HOSTDOWNLOAD) {
-		out("the firmware is up\n");
-	} else {
-		out("it did not come up\n");
-		return;
-	}
-
-	/* What it can do, and how it will lay out a touch report. */
-	static const uint8_t asks[2] = { TCM_CMD_GET_APP_INFO, TCM_CMD_GET_REPORT_CONF };
-
-	for (int i = 0; i < 2; i++) {
-		if (!tcm_write(asks[i], 0, 0, 0, 0)) {
-			continue;
-		}
-		/*
-		 * The chip pushes reports of its own between answers -- a status report, a touch --
-		 * and those are not what was asked for, so read past them.
-		 */
-		for (int skip = 0; skip < 4; skip++) {
-			r = tcm_read_patiently(&code, buf, sizeof(buf), &got);
-			if (r != 1 || code < 0x10) {
-				break;
-			}
-			out("  (a report on the way: code ");
-			out_hex(code);
-			out(")\n");
-		}
-		out("answer to ");
-		out_hex(asks[i]);
-		out(": code ");
-		out_hex(code);
-		out(", ");
-		out_hex(got);
-		out(" bytes:");
-		for (uint32_t k = 0; k < got && k < 48; k++) {
-			out_putc(' ');
-			out_hex(buf[k]);
-		}
-		out("\n");
-	}
-
-	/*
-	 * Ask for touch reports. The phone's driver leaves this to the chip's own configuration and
-	 * the log shows it never sending the command, but asking costs one message and a chip that
-	 * was already reporting does not mind being told again.
-	 */
-	{
-		uint8_t which = TCM_REPORT_TOUCH;
-
-		out("asking for touch reports: ");
-		if (tcm_write(TCM_CMD_ENABLE_REPORT, &which, 1, 0, 0) &&
-		    tcm_read_patiently(&code, buf, sizeof(buf), &got) == 1) {
-			out("code ");
-			out_hex(code);
-		} else {
-			out("no answer");
-		}
-		out("\n");
-	}
-
-	/*
-	 * And now the thing itself: a finger on the glass, and whether the chip says so.
-	 */
-	out("\n>>> TOUCH THE SCREEN NOW -- forty-five seconds <<<\n\n");
-
-	uint32_t fingers = 0, reports = 0;
-
-	for (uint32_t waited = 0; waited < 45000; waited += 5) {
-		if (!tcm_irq()) {
-			dbg_delay_ms(5);
-			continue;
-		}
-		if (tcm_read(&code, buf, sizeof(buf), &got) != 1) {
-			dbg_delay_ms(5);
-			waited += 5;
-			continue;
-		}
-		if (code != TCM_REPORT_TOUCH) {
-			out("  (code ");
-			out_hex(code);
-			out(")\n");
-			continue;
-		}
-		reports++;
-		fingers += (uint32_t)touch_say_report(buf, got);
-	}
-	out("\nheard ");
-	out_hex(reports);
-	out(" reports, ");
-	out_hex(fingers);
-	out(" of them with a finger on the glass\n");
-}
-/*
- * Android's driver expects this chip where a power-on leaves it: in its ROM bootloader, with the
- * bus as the preloader set it. Finding anything else it gives up on the touch screen for that
- * whole boot -- "Failed to detect the sensor" -- and the phone comes up unable to be touched. So
- * a probe that has started firmware in the chip, or borrowed its pins, puts both back before
- * Android runs.
- */
-static void touch_hand_back(void)
-{
-	if (touch_clk_cfg2_seen) {
-		uint32_t mask = SPI_SEL_FIELD | SPI_SEL_PDN;
-
-		wr32(TOPCKGEN_BASE + CLK_CFG_2_SET, touch_clk_cfg2 & mask);
-		wr32(TOPCKGEN_BASE + CLK_CFG_2_CLR, ~touch_clk_cfg2 & mask);
-	}
-	spi_pins_to_spi2();
-	__asm__ volatile("dsb sy");
-	tcm_reset();
-}
-#endif /* TOUCH_PROBE */
 
 /* ---- choosing what to boot ---- */
 
@@ -4469,7 +3251,6 @@ static int pmsg_take(const char *flag, uint32_t n)
 	return found;
 }
 
-#if SOC_IS_MT6781
 /*
  * On the MT6781 Android's pmsg flag does not always get here: LK can put ramoops back from expdb over it.
  * So volume down, held while this asks, is a request too: keypad key 1, bit 1 of KP_MEM1, clear while the
@@ -4491,15 +3272,12 @@ static int volume_down_held(const char *what)
 	}
 	return 0;
 }
-#endif
 
 static int xnu_requested(void)
 {
 	int asked = pmsg_take(boot_xnu_flag, sizeof(boot_xnu_flag) - 1);
 
-#if SOC_IS_MT6781
 	asked = asked || volume_down_held("Darwin/XNU");
-#endif
 	return asked;
 }
 
@@ -4525,343 +3303,6 @@ static int boot_choice(void)
 	return xnu;
 }
 
-#if GPU_PROBE
-#include "mtkpwrap.h"
-#include "mtkmali.h"
-
-static const char gpu_probe_flag[] = "OPENMAPPLE:GPU-PROBE";
-
-static void say_mv(const char *name, int on, uint16_t selector)
-{
-	out(name);
-	out(on ? " on at " : " off, set for ");
-	out_dec(mt6358_millivolts(selector));
-	out(" mV");
-}
-
-/*
- * Wake the GPU and ask it what it is. Each step names what it is about to touch before touching
- * it, so if one hangs the panel keeps its last line; and whatever this switches on it switches
- * off again before Android runs, which expects the GPU as the preloader left it.
- */
-static void gpu_probe(void)
-{
-	uint16_t hwcid = 0, vgpu_con = 0, vgpu_dbg = 0, vgpu_sel = 0, vsram_con = 0, vsram_dbg = 0, vsram_sel = 0;
-	int we_lit_vgpu = 0, we_lit_vsram = 0, up = 0, stage = 0;
-	uint32_t status, status2, clk_cfg1;
-
-	/* ---- the rails ---- */
-	out("PMIC: ");
-	if (!pwrap_read(MT6358_HWCID, &hwcid)) {
-		out("the wrapper does not answer (WACS2_EN ");
-		out_hex(rd32(PWRAP_BASE + PWRAP_WACS2_EN));
-		out(")\n");
-		return;
-	}
-	out("chip ");
-	out_hex(hwcid);
-	out("\n  ");
-	pwrap_read(MT6358_BUCK_VGPU_CON0, &vgpu_con);
-	pwrap_read(MT6358_BUCK_VGPU_DBG1, &vgpu_dbg);
-	pwrap_read(MT6358_BUCK_VGPU_ELR0, &vgpu_sel);
-	pwrap_read(MT6358_LDO_VSRAM_GPU_CON0, &vsram_con);
-	pwrap_read(MT6358_LDO_VSRAM_GPU_DBG1, &vsram_dbg);
-	pwrap_read(MT6358_LDO_VSRAM_CON3, &vsram_sel);
-	say_mv("VGPU", vgpu_dbg & 1, vgpu_sel);
-	out(", ");
-	say_mv("VSRAM_GPU", vsram_dbg & 1, vsram_sel);
-	out("\n");
-
-	/*
-	 * A rail that is off is switched on at the voltage it is already set for -- but only a
-	 * voltage a GPU can sensibly run at: nothing here chooses one.
-	 */
-	if (!(vsram_dbg & 1) || !(vgpu_dbg & 1)) {
-		uint32_t mv_gpu = mt6358_millivolts(vgpu_sel), mv_sram = mt6358_millivolts(vsram_sel);
-
-		if (mv_gpu < 575 || mv_gpu > 900 || mv_sram < 750 || mv_sram > 1000) {
-			out("  a rail is off and set for a voltage I will not switch on: stopping\n");
-			return;
-		}
-		if (!(vsram_dbg & 1)) {
-			out("  switching VSRAM_GPU on\n");
-			pwrap_write(MT6358_LDO_VSRAM_GPU_CON0, vsram_con | 1);
-			we_lit_vsram = 1;
-		}
-		if (!(vgpu_dbg & 1)) {
-			out("  switching VGPU on\n");
-			pwrap_write(MT6358_BUCK_VGPU_CON0, vgpu_con | 1);
-			we_lit_vgpu = 1;
-		}
-		dbg_delay_ms(2);
-		pwrap_read(MT6358_BUCK_VGPU_DBG1, &vgpu_dbg);
-		pwrap_read(MT6358_LDO_VSRAM_GPU_DBG1, &vsram_dbg);
-		out("  now VGPU ");
-		out(vgpu_dbg & 1 ? "on" : "STILL OFF");
-		out(", VSRAM_GPU ");
-		out(vsram_dbg & 1 ? "on" : "STILL OFF");
-		out("\n");
-		if (!(vgpu_dbg & 1) || !(vsram_dbg & 1)) {
-			goto rails_off;
-		}
-	}
-
-	/*
-	 * ---- the processor, as LK left it: read only ----
-	 * The three CPU PLLs (Linux clk-mt6768.c: CON1 holds a 22-bit multiplier of 26 MHz / 2^14 and
-	 * a power-of-two post divider in bits 24..26) and the two PMIC rails the clusters run on.
-	 */
-	{
-		static const struct { const char *name; uint32_t con1; } plls[3] = {
-			{ "ARMPLL (big)", 0x20c }, { "ARMPLL_L (little)", 0x21c }, { "CCIPLL (bus)", 0x22c },
-		};
-		uint16_t v11 = 0, v12 = 0, s11 = 0, s12 = 0;
-
-		for (int i = 0; i < 3; i++) {
-			uint32_t c = rd32(0x1000c000ULL + plls[i].con1);
-			uint64_t mhz = (26ull * (c & 0x3fffffu)) >> 14;
-
-			mhz >>= (c >> 24) & 7u;
-			out(plls[i].name);
-			out(": CON1 ");
-			out_hex(c);
-			out(" = ");
-			out_dec((uint32_t)mhz);
-			out(" MHz\n");
-		}
-		pwrap_read(0x139e, &v11);               /* VPROC11_DBG0: the voltage it is at */
-		pwrap_read(0x141e, &v12);               /* VPROC12_DBG0 */
-		pwrap_read(0x1b60, &s11);               /* VSRAM_PROC11_DBG0 (bits 14..8) */
-		out("VPROC11 ");
-		out_dec(mt6358_millivolts(v11));
-		out(" mV, VPROC12 ");
-		out_dec(mt6358_millivolts(v12));
-		out(" mV, VSRAM_PROC11 ");
-		out_dec(mt6358_millivolts((uint16_t)(s11 >> 8)));
-		out(" mV\n");
-		(void)s12;
-	}
-
-	/* ---- what the preloader left ---- */
-	status = rd32(SPM_BASE + SPM_PWR_STATUS);
-	status2 = rd32(SPM_BASE + SPM_PWR_STATUS_2ND);
-	clk_cfg1 = rd32(TOPCKGEN_BASE + CLK_CFG_1);
-	out("SPM power status ");
-	out_hex(status);
-	out(" / ");
-	out_hex(status2);
-	out(", mfg_sel ");
-	out_hex(clk_cfg1 & 0xff);
-	out(", bus protection ");
-	out_hex(rd32(INFRACFG_BASE + INFRA_TOPAXI_PROTECTEN_STA1));
-	out("\n");
-	for (int i = 0; i < 4; i++) {
-		if (status & mali_domains[i].status) {
-			out("  ");
-			out(mali_domains[i].name);
-			out(" is on already; leaving the GPU alone\n");
-			goto rails_off;
-		}
-	}
-
-	/* ---- the clock, then the power ---- */
-	out("mfg_sel to syspll_d3 (364 MHz)\n");
-	wr32(TOPCKGEN_BASE + CLK_CFG_1_CLR, MFG_SEL_FIELD | MFG_SEL_PDN);
-	wr32(TOPCKGEN_BASE + CLK_CFG_1_SET, MFG_SEL_SYSPLL_D3);
-	__asm__ volatile("dsb sy");
-	dbg_delay_us(10);
-
-	for (up = 0; up < 4; up++) {
-		const struct mali_domain *d = &mali_domains[up];
-
-		out("  powering ");
-		out(d->name);
-		out(": ");
-		if (!mali_domain_on(d, &stage)) {
-			out("stalled at step ");
-			out_dec((uint32_t)stage);
-			out(", its control ");
-			out_hex(rd32(SPM_BASE + d->con));
-			out(", status ");
-			out_hex(rd32(SPM_BASE + SPM_PWR_STATUS));
-			out("\n");
-			mali_domain_off(d);             /* whatever half of it did come up */
-			break;
-		}
-		out("on\n");
-		if (up == 1) {
-			out("  opening the bus to the GPU block\n");
-			mali_bus_open();
-		}
-	}
-	if (up < 4) {
-		goto power_off;
-	}
-
-	/* ---- inside the block ---- */
-	out("mfgcfg clock gates ");
-	out_hex(rd32(MFGCFG_BASE + MFG_CG_CON));
-	wr32(MFGCFG_BASE + MFG_CG_CLR, MFG_CG_BG3D);
-	__asm__ volatile("dsb sy");
-	out(" -> ");
-	out_hex(rd32(MFGCFG_BASE + MFG_CG_CON));
-	out("\n");
-
-	{
-		uint32_t id = rd32(MALI_BASE + GPU_ID);
-		uint32_t shaders = rd32(MALI_BASE + GPU_SHADER_PRESENT);
-		uint32_t tiler = rd32(MALI_BASE + GPU_TILER_PRESENT);
-		uint32_t l2 = rd32(MALI_BASE + GPU_L2_PRESENT);
-
-		out("GPU_ID ");
-		out_hex(id);
-		out(": ");
-		out(mali_name(id));
-		out(" r");
-		out_dec((id >> 12) & 0xf);
-		out("p");
-		out_dec((id >> 4) & 0xff);
-		out("\n  L2 features ");
-		out_hex(rd32(MALI_BASE + GPU_L2_FEATURES));
-		out(", tiler ");
-		out_hex(rd32(MALI_BASE + GPU_TILER_FEATURES));
-		out(", memory ");
-		out_hex(rd32(MALI_BASE + GPU_MEM_FEATURES));
-		out(", MMU ");
-		out_hex(rd32(MALI_BASE + GPU_MMU_FEATURES));
-		out("\n  address spaces ");
-		out_hex(rd32(MALI_BASE + GPU_AS_PRESENT));
-		out(", job slots ");
-		out_hex(rd32(MALI_BASE + GPU_JS_PRESENT));
-		out(", threads ");
-		out_dec(rd32(MALI_BASE + GPU_THREAD_MAX));
-		out("\n  shader cores ");
-		out_hex(shaders);
-		out(", tiler ");
-		out_hex(tiler);
-		out(", L2 ");
-		out_hex(l2);
-		out("\n");
-
-		/* A soft reset: what any driver does first, and the GPU answers it with an interrupt bit. */
-		wr32(MALI_BASE + GPU_INT_MASK, 0);
-		wr32(MALI_BASE + GPU_INT_CLEAR, 0xffffffffu);
-		wr32(MALI_BASE + GPU_CMD, GPU_CMD_SOFT_RESET);
-		out("soft reset: ");
-		out(mali_wait(MALI_BASE + GPU_INT_RAWSTAT, GPU_IRQ_RESET_COMPLETED, GPU_IRQ_RESET_COMPLETED, 100) ?
-		    "done\n" : "NO ANSWER\n");
-		wr32(MALI_BASE + GPU_INT_CLEAR, 0xffffffffu);
-
-		/* Its parts, each asked to power up and watched until it says it is ready. */
-		out("L2 power: ");
-		wr32(MALI_BASE + GPU_L2_PWRON, l2);
-		out(mali_wait(MALI_BASE + GPU_L2_READY, l2, l2, 50) ? "ready" : "NOT READY");
-		out(", tiler: ");
-		wr32(MALI_BASE + GPU_TILER_PWRON, tiler);
-		out(mali_wait(MALI_BASE + GPU_TILER_READY, tiler, tiler, 50) ? "ready" : "NOT READY");
-		out(", shader cores: ");
-		wr32(MALI_BASE + GPU_SHADER_PWRON, shaders);
-		out(mali_wait(MALI_BASE + GPU_SHADER_READY, shaders, shaders, 50) ? "ready" : "NOT READY");
-		out(" (");
-		out_hex(rd32(MALI_BASE + GPU_SHADER_READY));
-		out(")\n");
-
-		/*
-		 * The first job. Address space 0 is put in identity mode -- no page tables yet, a
-		 * GPU address is the physical one -- and slot 1 is given one job: write 0xc0ffee01
-		 * into a word of DRAM that the processor cleared. The processor reading it back is
-		 * the GPU's job manager, its MMU and its path to memory all working at once.
-		 */
-		{
-			volatile uint32_t *job = (volatile uint32_t *)0x50000000ULL;
-			volatile uint32_t *target = (volatile uint32_t *)0x50001000ULL;
-			uint64_t as = MALI_BASE + AS0_BASE, js = MALI_BASE + JS_BASE(1);
-			uint32_t raw;
-
-			for (int i = 0; i < 16; i++) {
-				job[i] = 0;
-			}
-			*target = 0;
-			job[4] = (MALI_JOB_WRITE_VALUE << 1) | 1u;        /* 64-bit pointers */
-			job[4] |= 1u << 16;                                /* job index 1 */
-			job[8] = 0x50001000u;                              /* where */
-			job[9] = 0;
-			job[10] = MALI_WRITE_IMM32;                        /* what kind of value */
-			job[12] = 0xc0ffee01u;                             /* the value */
-			__asm__ volatile("dsb sy");
-
-			wr32(as + AS_TRANSCFG_LO, AS_TRANSCFG_IDENTITY);
-			wr32(as + AS_TRANSCFG_HI, 0);
-			wr32(as + AS_MEMATTR_LO, 0x88888888u);
-			wr32(as + AS_MEMATTR_HI, 0x88888888u);
-			wr32(as + AS_COMMAND, AS_COMMAND_UPDATE);
-			out("MMU address space 0 (identity): ");
-			out(mali_wait(as + AS_STATUS, AS_STATUS_ACTIVE, 0, 50) ? "set\n" : "STILL BUSY\n");
-
-			wr32(MALI_BASE + JOB_INT_MASK, 0);
-			wr32(MALI_BASE + JOB_INT_CLEAR, 0xffffffffu);
-			wr32(js + JS_HEAD_NEXT_LO, 0x50000000u);
-			wr32(js + JS_HEAD_NEXT_HI, 0);
-			wr32(js + JS_AFFINITY_NEXT_LO, shaders);
-			wr32(js + JS_AFFINITY_NEXT_HI, 0);
-			wr32(js + JS_CONFIG_NEXT, JS_CONFIG_AS0_FLUSHED);
-			wr32(js + JS_COMMAND_NEXT, JS_COMMAND_START);
-			mali_wait(MALI_BASE + JOB_INT_RAWSTAT, (1u << 1) | (1u << 17), 0xffffffffu, 100);
-			raw = rd32(MALI_BASE + JOB_INT_RAWSTAT);
-			out("job: interrupts ");
-			out_hex(raw);
-			out(", slot status ");
-			out_hex(rd32(js + JS_STATUS));
-			out(", MMU fault ");
-			out_hex(rd32(as + AS_FAULTSTATUS));
-			out(" at ");
-			out_hex(rd32(as + AS_FAULTADDRESS_LO));
-			out(", job's own status ");
-			out_hex(job[0]);
-			out("\n  the word the GPU was to write: ");
-			out_hex(*target);
-			out(*target == 0xc0ffee01u ? "  <- THE GPU RAN A JOB\n" : "  (not written)\n");
-			wr32(MALI_BASE + JOB_INT_CLEAR, 0xffffffffu);
-		}
-
-		/* And back down, inside out. */
-		wr32(MALI_BASE + GPU_SHADER_PWROFF, shaders);
-		mali_wait(MALI_BASE + GPU_SHADER_READY, shaders, 0, 50);
-		wr32(MALI_BASE + GPU_TILER_PWROFF, tiler);
-		mali_wait(MALI_BASE + GPU_TILER_READY, tiler, 0, 50);
-		wr32(MALI_BASE + GPU_L2_PWROFF, l2);
-		mali_wait(MALI_BASE + GPU_L2_READY, l2, 0, 50);
-	}
-	wr32(MFGCFG_BASE + MFG_CG_SET, MFG_CG_BG3D);
-	__asm__ volatile("dsb sy");
-
-power_off:
-	/* Everything that came up goes down again, the cores first and the bridge last. */
-	while (up-- > 0) {
-		const struct mali_domain *d = &mali_domains[up];
-
-		if (up == 1 && !mali_bus_close()) {
-			out("  the bus protection did not close; leaving MFG up\n");
-			break;
-		}
-		out("  powering ");
-		out(d->name);
-		out(mali_domain_off(d) ? " off\n" : " off: NO ANSWER\n");
-	}
-	wr32(TOPCKGEN_BASE + CLK_CFG_1_CLR, MFG_SEL_FIELD | MFG_SEL_PDN);
-	wr32(TOPCKGEN_BASE + CLK_CFG_1_SET, clk_cfg1 & (MFG_SEL_FIELD | MFG_SEL_PDN));
-	__asm__ volatile("dsb sy");
-
-rails_off:
-	if (we_lit_vgpu) {
-		pwrap_write(MT6358_BUCK_VGPU_CON0, vgpu_con & ~1u);
-	}
-	if (we_lit_vsram) {
-		pwrap_write(MT6358_LDO_VSRAM_GPU_CON0, vsram_con & ~1u);
-	}
-	out("GPU probe done\n");
-}
-#endif /* GPU_PROBE */
 
 #if SOC_PROBE
 /* MT6781's OVL0 (the Hot 20's OVL0_BASE is disp_ccorr0 there); only OVL0: LK's display path keeps it clocked */
@@ -4913,68 +3354,7 @@ static void soc_probe(void)
 }
 #endif
 
-#if MARKER_TEST
-#define MARK_TEST           0x5354584eu /* "NXTS" */
-#define MARK_TEST_HOW       (MARKER_TEST == 2 ? "PSCI SYSTEM_RESET" : MARKER_TEST == 3 ? \
-                             "the watchdog, DDR reserve on" : "the watchdog")
-/* TOPRGU MODE (vendor mtk_wdt/dbgtop): EN bit 0, EXRST_EN bit 2 (PMIC reset), IRQ_EN bit 3, DUAL_EN bit 6, and
- * on MT6781, where the device tree has no dbgtop, DDR_RESERVE bit 7 */
-#define MARK_TEST_MODE      (MARKER_TEST == 3 ? 0x81u : 0x1u)
-static const char marker_test_flag[] = "OPENMAPPLE:MARKER-TEST";
 
-static void marker_test(void)
-{
-	/* the marker, the end of ramoops' pmsg zone, and free DRAM across XNU's range */
-	static const uint64_t map[] = { MARKER_PA, 0x4d0e8000ULL, 0xc0000000ULL, 0x100000000ULL, 0x13f000000ULL };
-	int kept = 0;
-
-	for (uint32_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
-		uint32_t v = rd32(map[i]);
-
-		out("marker test: ");
-		out_hex(map[i]);
-		out(v == MARK_TEST ? " kept " : " holds ");
-		out_hex(v);
-		out("\n");
-		if (v == MARK_TEST) {
-			kept = 1;
-			wr32(map[i], 0);
-		}
-	}
-	if (kept) {
-		out("marker test: the pattern came through ");
-		out(MARK_TEST_HOW);
-		out("\n");
-		return;
-	}
-	if (!pmsg_take(marker_test_flag, sizeof(marker_test_flag) - 1)) {
-		return;
-	}
-	for (uint32_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
-		wr32(map[i], MARK_TEST);
-	}
-	out("marker test: pattern written, reset by ");
-	out(MARK_TEST_HOW);
-	out("\n");
-	if (MARKER_TEST == 2) {
-		psci_system_reset();   /* not reset_board(): its watchdog fallback would hide a PSCI that returns */
-		out("marker test: PSCI SYSTEM_RESET returned\n");
-		return;
-	}
-	wr32(TOPRGU_LENGTH, ((1u * 32768u / 512u) << 5) | 0x8u);
-	wr32(TOPRGU_RESTART, TOPRGU_RESTART_KEY);
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY | MARK_TEST_MODE);
-	dbg_delay_ms(5000);
-	wr32(TOPRGU_MODE, TOPRGU_MODE_KEY);
-	out("marker test: the watchdog did not fire\n");
-}
-#endif
-
-#if CAM_PROBE
-#include "mtkcam.h"
-
-static const char cam_probe_flag[] = "OPENMAPPLE:CAM-PROBE";
-#endif /* CAM_PROBE */
 
 #if KEY_PROBE
 /*
@@ -5357,9 +3737,6 @@ void mtkloader_main(uint64_t dtb)
 #if SOC_PROBE
 	soc_probe();
 #endif
-#if MARKER_TEST
-	marker_test();
-#endif
 	chain_android();
 #endif
 	uint32_t mark = marker_get();
@@ -5410,47 +3787,6 @@ void mtkloader_main(uint64_t dtb)
 #endif
 #if KEY_PROBE
 	key_probe();
-#endif
-#if TOUCH_PROBE
-	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
-	fbc.x = 0;
-	fbc.y = fbc.top = 0;
-	out("== mtkloader: touch screen probe ==\n");
-	touch_probe();
-	dbg_delay_ms(4000);
-	chain_android();
-#endif
-#if GPU_PROBE
-	if (pmsg_take(gpu_probe_flag, sizeof(gpu_probe_flag) - 1)) {
-		fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
-		fbc.x = 0;
-		fbc.y = fbc.top = 0;
-		out("== mtkloader: GPU probe ==\n");
-		gpu_probe();
-		dbg_delay_ms(4000);
-	}
-	chain_android();
-#endif
-#if CAM_PROBE
-	if (pmsg_take(cam_probe_flag, sizeof(cam_probe_flag) - 1)) {
-		fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
-		fbc.x = 0;
-		fbc.y = fbc.top = 0;
-		out("== mtkloader: CAM probe ==\n");
-		cam_probe();
-		dbg_delay_ms(4000);
-	}
-	chain_android();
-#endif
-#if MSDC_TEST
-	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
-	fbc.x = 0;
-	fbc.y = fbc.top = 0;
-	out("== mtkloader: eMMC read test ==\n");
-	msdc_self_test();
-	dbg_delay_ms(4000);
-	wdt_disable();
-	chain_android();
 #endif
 	if (!boot_choice()) {
 		chain_android();
