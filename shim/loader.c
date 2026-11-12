@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "fdt.h"
+#include "identity.h"
 #include "loader.h"
 #ifdef MT6781_SHIM
 #include "holes.h"
@@ -181,6 +182,10 @@ const char *loader_boot(uintptr_t dtb)
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
+	uint32_t bootargs_len = 0;
+	uintptr_t bootargs = fdt_chosen_prop(dtb, "bootargs", &bootargs_len);
+	if (adt_phone_serial((volatile uint8_t *)adt_pa, p->adt_size, (const volatile char *)bootargs, bootargs_len))
+		con_hex2("SERIAL", "from=", 1, "lk=", 1);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 
