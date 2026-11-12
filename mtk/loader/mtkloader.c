@@ -1663,7 +1663,8 @@ static uint32_t mp_lvts_golden;                    /* 0: not known */
 /*
  * Safe boot, for when the boot record starts something that freezes the phone (Metal at boot, say) and the USB link
  * dies with it: keep holding volume down past "Booting Darwin / XNU" until "safe boot: mp_bootrec=0" shows (the 3 s
- * window opens once the payload is copied). The shim is then told mp_bootrec=0 and boots the payload's own line. Let go
+ * window opens once the payload is copied). The shim is then told mp_bootrec=0 mp_mem4g=0 and boots the payload's own
+ * line in the 2 GB layout. Let go
  * (three samples up) and the window closes: a normal boot. Keypad bit as volume_down_held().
  */
 static void safe_boot_args(char *cl)
@@ -1687,15 +1688,15 @@ static void safe_boot_args(char *cl)
 	while (*at) {
 		at++;
 	}
-	if ((uint32_t)(at - cl) + 14 >= BOOT_LINE_LENGTH) {
+	if ((uint32_t)(at - cl) + 25 >= BOOT_LINE_LENGTH) {
 		out("safe boot: no room on the command line\n");
 		return;
 	}
-	for (const char *s = " mp_bootrec=0"; *s; s++) {
+	for (const char *s = " mp_bootrec=0 mp_mem4g=0"; *s; s++) {
 		*at++ = *s;
 	}
 	*at = 0;
-	out("safe boot: mp_bootrec=0\n");
+	out("safe boot: mp_bootrec=0 mp_mem4g=0\n");
 }
 
 static void lvts_args(char *cl)
@@ -2592,7 +2593,7 @@ static uint64_t ili_table_copy(uint64_t at)
 #endif
 
 /* LK's /chosen linux,initrd-end moved to END, in place: the shim keeps the payload and the tables after it out of XNU's
- * memory with mp_mem4g=1 */
+ * memory (mp_mem4g) */
 static void initrd_end_set(uint64_t end)
 {
 	uint32_t len = 0;

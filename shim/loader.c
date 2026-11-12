@@ -21,8 +21,8 @@ const char *mapple_bootfile(const char *payload_cmdline);	/* bootrec.c */
 #define PAGE_16K		0x4000UL
 
 #ifdef MT6781_SHIM
-/* mp_mem4g=1: XNU's RAM starts at DRAM's start instead of the payload's phys_base, minus the holes (holes.c), whose
- * list is left in the boot_args page for the kernel (arm_vm_init.c) */
+/* mp_mem4g (1 unless mp_mem4g=0): XNU's RAM starts at DRAM's start instead of the payload's phys_base, minus the holes
+ * (holes.c), whose list is left in the boot_args page for the kernel (arm_vm_init.c) */
 #define DRAM_BASE		0x40000000UL
 #define MAPPLE_HOLES_OFF	0x2000	/* in the boot_args page, after the payload's line */
 
@@ -139,7 +139,7 @@ const char *loader_boot(uintptr_t dtb)
 	uint64_t phys_base = p->phys_base, mem_size = p->mem_size;
 #ifdef MT6781_SHIM
 	int nholes = -1;
-	if (has_arg(cmdline, "mp_mem4g=1")) {
+	if (!has_arg(cmdline, "mp_mem4g=0")) {
 		uint64_t end = p->phys_base + p->mem_size;
 		uint64_t adt = p->kernel_end - p->virt_base + DRAM_BASE;
 		uint64_t top = ((adt + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
