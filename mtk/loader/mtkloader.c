@@ -1664,7 +1664,8 @@ static uint32_t mp_lvts_golden;                    /* 0: not known */
  * Safe boot, for when the boot record starts something that freezes the phone (Metal at boot, say) and the USB link
  * dies with it: keep holding volume down past "Booting Darwin / XNU" until "safe boot: mp_bootrec=0" shows (the 3 s
  * window opens once the payload is copied). The shim is then told mp_bootrec=0 mp_mem4g=0 and boots the payload's own
- * line in the 2 GB layout. Let go
+ * line in the 2 GB layout, with Metal at boot turned back into the bare driver (mp_gpu=2 becomes mp_gpu=1 in place: the
+ * first occurrence of a boot-arg is the one XNU reads). Let go
  * (three samples up) and the window closes: a normal boot. Keypad bit as volume_down_held().
  */
 static void safe_boot_args(char *cl)
@@ -1696,7 +1697,13 @@ static void safe_boot_args(char *cl)
 		*at++ = *s;
 	}
 	*at = 0;
-	out("safe boot: mp_bootrec=0 mp_mem4g=0\n");
+	for (char *g = cl; *g; g++) {
+		if ((g == cl || g[-1] == ' ') && g[0] == 'm' && g[1] == 'p' && g[2] == '_' && g[3] == 'g' && g[4] == 'p' &&
+		    g[5] == 'u' && g[6] == '=' && g[7] == '2' && (g[8] == ' ' || g[8] == 0)) {
+			g[7] = '1';
+		}
+	}
+	out("safe boot: mp_bootrec=0 mp_mem4g=0 mp_gpu=1\n");
 }
 
 static void lvts_args(char *cl)
