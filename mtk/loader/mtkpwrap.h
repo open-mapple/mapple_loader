@@ -49,7 +49,7 @@ static int pwrap_read(uint32_t reg, uint16_t *value)
 }
 
 /* One out: the top bit says write. Waiting for idle afterwards says it has gone. */
-static int pwrap_write(uint32_t reg, uint16_t value)
+static int __attribute__((unused)) pwrap_write(uint32_t reg, uint16_t value)
 {
 	if (!pwrap_wait(PWRAP_FSM_IDLE)) {
 		return 0;
@@ -71,7 +71,7 @@ static int pwrap_write(uint32_t reg, uint16_t value)
 #define MT6358_LDO_VSRAM_GPU_DBG1 0x1be4
 #define MT6358_LDO_VSRAM_CON3     0x1bf4  /* bits 6..0: VSRAM_GPU's voltage */
 
-static uint32_t mt6358_millivolts(uint16_t selector)
+static uint32_t __attribute__((unused)) mt6358_millivolts(uint16_t selector)
 {
 	return 500 + ((selector & 0x7fu) * 625u) / 100u;
 }

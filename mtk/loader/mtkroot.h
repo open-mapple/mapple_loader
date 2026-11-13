@@ -12,6 +12,11 @@
 typedef const volatile uint8_t *(*root_rd)(uint64_t off);
 
 #define ROOT_ROOM            (128ULL << 20)
+/* the room root_check asks for after the volume, by the product's layout: 128 MiB (single and split: the saved area
+ * and the tail), 0 (development: the headers only, the volume inside the partition) */
+#ifndef ROOT_ROOM_MIB
+#define ROOT_ROOM_MIB        128
+#endif
 #define TAIL_FW_FROM_END     (63ULL << 20)
 #define TAIL_FW_SIZE         (15ULL << 20)
 
@@ -34,10 +39,10 @@ static uint64_t hfs_bytes(const volatile uint8_t *h)
 /*
  * NULL when the partition (part bytes) holds a whole volume: the header at 1 KiB, the alternate header 1 KiB before
  * the volume's end with the same signature, block size, block count and createDate (a stopped flash has none there, an
- * earlier image's has another date), and 128 MiB after the volume. Else why not, with *unread 1 when a block could not
+ * earlier image's has another date), and room bytes after the volume (ROOT_ROOM_MIB, the product's). Else why not, with *unread 1 when a block could not
  * be read (the volume may be fine) and 0 when the headers read but are wrong.
  */
-static const char __attribute__((unused)) *root_check(root_rd rd, uint64_t part, int *unread)
+static const char __attribute__((unused)) *root_check(root_rd rd, uint64_t part, uint64_t room, int *unread)
 {
 	const volatile uint8_t *h = rd(1024), *a;
 	uint8_t p[48];
@@ -52,8 +57,8 @@ static const char __attribute__((unused)) *root_check(root_rd rd, uint64_t part,
 	if (!vol) {
 		return "no HFS+ volume header at 1 KiB";
 	}
-	if (vol > part || part - vol < ROOT_ROOM) {
-		return "the volume and 128 MiB do not fit the partition";
+	if (vol > part || part - vol < room) {
+		return "the volume and the room after it do not fit the partition";
 	}
 	for (uint32_t i = 0; i < sizeof(p); i++) {
 		p[i] = h[i];

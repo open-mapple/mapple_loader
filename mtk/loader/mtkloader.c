@@ -186,8 +186,18 @@ static void xnu_ufs_args(char *cl);
 #if XNU_DEFAULT && !(XNU_SHIM && SOC_IS_MT6781)
 #error "XNU_DEFAULT needs XNU_SHIM=1 (the root partition's name is on the shim's command line)"
 #endif
-/* reads of the root partition: its check, and the touch firmware from its tail when the payload has none */
-#define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && (XNU_DEFAULT || XNU_TOUCH_ILI))
+/* 1 (with XNU_SHIM): the dual boot menu, Android or iOS (volume keys move, Power starts, a timeout starts the default:
+ * mp_menu_default=, mp_menu_secs= from the boot-args record or the payload's line), and iOS only when the root
+ * partition passes its check; instead of "hold volume down for Darwin/XNU". */
+#ifndef SPLIT_MENU
+#define SPLIT_MENU          0
+#endif
+#if SPLIT_MENU && !(XNU_SHIM && SOC_IS_MT6781 && !XNU_DEFAULT && !MENU_DEFAULT_XNU)
+#error "SPLIT_MENU needs XNU_SHIM=1 on the MT6781, without XNU_DEFAULT or MENU_DEFAULT_XNU"
+#endif
+/* reads of the root partition: its check, the menu's record, and the touch firmware from its tail when the payload has
+ * none */
+#define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && (XNU_DEFAULT || XNU_TOUCH_ILI || SPLIT_MENU))
 /* 1: check at EL1 that the timer interrupts arrive at all (diagnostics, leaves GIC state). */
 #ifndef TIMER_PROBE
 #define TIMER_PROBE         0
@@ -3125,10 +3135,16 @@ static int __attribute__((unused)) xnu_requested(void)
 	return asked;
 }
 
+#if SPLIT_MENU
+static int split_menu(void);
+#endif
+
 static int boot_choice(void)
 {
 #if XNU_DEFAULT
 	int xnu = root_ok();
+#elif SPLIT_MENU
+	int xnu = split_menu();
 #else
 	int xnu = MENU_DEFAULT_XNU || xnu_requested();
 #endif
@@ -3404,14 +3420,14 @@ static int root_ok(void)
 
 		unread = 1;
 		if (part) {
-			why = root_check(rp_read, part, &unread);
+			why = root_check(rp_read, part, (uint64_t)ROOT_ROOM_MIB << 20, &unread);
 		}
 		out("root: ");
 		if (rp_name[0]) {
 			out(rp_name);
 			out(": ");
 		}
-		out(why ? why : "HFS+ volume whole, 128 MiB after it");
+		out(why ? why : "HFS+ volume whole, the room after it");
 		out(!unread ? (why ? "; Android\n" : "; XNU\n") : tries < 2 ? "; again\n" : "; stopped\n");
 		if (unread && tries < 2) {
 			dbg_delay_ms(500);
@@ -3559,6 +3575,165 @@ static void xnu_ufs_args(char *cl)
 	out("; LK's list ");
 	out_hex(utrl);
 	out("\n");
+}
+#endif
+
+#if SPLIT_MENU
+#include "../../shim/bootrec.h"
+#include "mtkpwrap.h"
+#include "splitmenu.h"
+
+#define MT6358_TOPSTATUS    0x028       /* bit 1 PWRKEY_DEB (Power), bit 3 HOMEKEY_DEB (volume up); 0 = pressed */
+
+/* to the log only, not the screen */
+static void menu_log(const char *s)
+{
+	uint64_t screen = fbc.base;
+
+	fbc.base = 0;
+	dbg_puts(s);
+	fbc.base = screen;
+}
+
+static void menu_puts(const char *s)
+{
+	while (*s) {
+		fbcon_putc(*s++);
+	}
+}
+
+/*
+ * The boot-args record's mp_menu_ args, where the shim reads the record (the root partition's last MiB). Its
+ * base_hash is not checked: the shim checks it against the line after this loader's additions, which do not exist
+ * yet. The menu's two args do no harm from a stale record, and mp_menu_secs is clamped so that Android stays
+ * reachable.
+ */
+static void split_record_args(uint64_t part, int *xnu, uint32_t *secs)
+{
+	static struct bootrec_rec rec;
+	const volatile uint8_t *b = part >= BOOTREC_TAIL_BLOCKS * UFS_BLOCK ?
+				    rp_read(part - BOOTREC_TAIL_BLOCKS * UFS_BLOCK) : 0;
+
+	if (!b) {
+		return;
+	}
+	for (uint32_t i = 0; i < sizeof(rec); i++) {
+		((uint8_t *)&rec)[i] = b[i];
+	}
+	if (bootrec_valid(&rec, rec.base_hash)) {
+		menu_log("menu: mp_menu_ args from the boot-args record\n");
+		menu_args(rec.cmdline, BOOTREC_LINE, xnu, secs);
+	}
+}
+
+static void menu_draw(int sel, int counting, uint32_t left, int pmic)
+{
+	static const char *const name[2] = { "Android", "iOS" };
+
+	fb_rect(0, 560, PANEL_W, 480, 0xff000000u);
+	fbc.scale = 3;
+	for (int i = 0; i < 2; i++) {
+		fbc.x = 48;
+		fbc.y = 600 + 96 * i;
+		fbc.fg = i == sel ? 0xff40ff40u : 0xff808080u;
+		menu_puts(i == sel ? "> " : "  ");
+		menu_puts(name[i]);
+	}
+	fbc.x = 48;
+	fbc.y = 840;
+	fbc.fg = 0xffffffffu;
+	if (counting) {
+		char n[3] = { (char)('0' + left / 10), (char)('0' + left % 10), 0 };
+		menu_puts(name[sel]);
+		menu_puts(" in ");
+		menu_puts(left < 10 ? n + 1 : n);
+		menu_puts(" s");
+	} else {
+		menu_puts(pmic ? "Volume: move  Power: start" : "Volume down: move");
+	}
+	if (!pmic) {
+		fbc.y = 936;
+		menu_puts("Power unreadable: timeout");
+	}
+	fbc.scale = 1;
+}
+
+/* 1: Darwin / XNU, only when the root partition passes root_check (as XNU_DEFAULT's, with the product's room) */
+static int split_menu(void)
+{
+	struct payload_info pi;
+	struct menu_key kd = { 0 }, ku = { 0 }, kp = { 0 };
+	const char *line = 0, *why = 0;
+	char v[4];
+	uint64_t part;
+	uint32_t secs = MENU_SECS_DEFAULT, ticks;
+	int xnu = 0, sel, unread = 1, pmic = 1, counting = 1;
+
+	if (parse_payload(&pi) && pi.xnu && memcmp_n(pi.xnu, "MAPPLEPL", 8) == 0) {
+		line = (const char *)pi.xnu + PAYLOAD_XNU_CMDLINE;
+	}
+	menu_args(line, BOOTREC_LINE, &xnu, &secs);
+	part = root_part(&why);
+	if (part && !(line && menu_arg(line, BOOTREC_LINE, "mp_bootrec=", v, sizeof(v)) && v[0] == '0')) {
+		split_record_args(part, &xnu, &secs);
+	}
+	sel = xnu;
+	if (pmsg_take(boot_xnu_flag, sizeof(boot_xnu_flag) - 1)) {
+		menu_log("menu: Darwin / XNU asked for once (pmsg)\n");
+		sel = 1;
+	} else {
+		ticks = secs * 50;
+		menu_draw(sel, counting, secs, pmic);
+		for (;;) {
+			uint16_t st = 0xffff;
+			int down = !(rd32(0x10010004ULL) & (1u << 1)), up = 0, power = 0, moved;
+
+			if (pmic && pwrap_read(MT6358_TOPSTATUS, &st)) {
+				up = !(st & (1u << 3));
+				power = !(st & (1u << 1));
+			} else if (pmic) {
+				pmic = 0;
+				menu_log("menu: the PMIC's key status not readable: volume down and the timeout only\n");
+				menu_draw(sel, counting, ticks / 50, pmic);
+			}
+			moved = menu_key_pressed(&kd, down) | menu_key_pressed(&ku, up);
+			if (menu_key_pressed(&kp, power)) {
+				break;
+			}
+			if (moved) {
+				sel ^= 1;
+				counting = 0;
+				menu_draw(sel, counting, 0, pmic);
+			} else if (counting) {
+				if (--ticks == 0) {
+					break;
+				}
+				if (ticks % 50 == 0) {
+					menu_draw(sel, counting, ticks / 50, pmic);
+				}
+			}
+			dbg_delay_ms(20);
+		}
+		fb_rect(0, 560, PANEL_W, 480, 0xff000000u);
+	}
+	if (sel && part) {
+		why = root_check(rp_read, part, (uint64_t)ROOT_ROOM_MIB << 20, &unread);
+	}
+	if (sel && (!part || why)) {
+		out("menu: no iOS: ");
+		out(why ? why : "no root partition");
+		out("; Android\n");
+		fbc.scale = 3;
+		fbc.x = 48;
+		fbc.y = 600;
+		fbc.fg = 0xffff4040u;
+		menu_puts(unread ? "iOS root not read" : "No iOS root in xnusys");
+		fbc.scale = 1;
+		fbc.fg = 0xffffffffu;
+		dbg_delay_ms(3000);
+		sel = 0;
+	}
+	return sel;
 }
 #endif
 
