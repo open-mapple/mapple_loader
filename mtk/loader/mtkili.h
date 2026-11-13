@@ -228,14 +228,79 @@ static int ili_probe(void)
  * on every display resume, without its reset pulse: SPI PLL wake (nine 0xA3), ICE mode with the MCU stopped
  * (0x25), the blocks AP, DATA and TUNING written at their addresses, each one's CRC computed by the chip's DMA and
  * read back from its last four bytes and compared with the file's, the code reset (0xAE to 0x40040), ICE mode left,
- * then the firmware version asked for, and report_ms of reports. ilifw.h is made from YOUR phone's firmware file
- * (mtk/tools/mkilifw.py) and never committed. All of it with the pins driven by hand, as above (the Hot 20's SPI2
- * would not finish twice in a row either: mtkspi.h).
+ * then the firmware version asked for, and report_ms of reports. All of it with the pins driven by hand, as above
+ * (the Hot 20's SPI2 would not finish twice in a row either: mtkspi.h).
+ *
+ * The firmware is the payload's item "ilifw", made by mtk/tools/mkilifw.py from YOUR phone's firmware file and never
+ * committed. Little-endian:
+ *   0   "ILFW"
+ *   4   the item's length
+ *   8   FNV-1a (32 bits) of its bytes from 16 on
+ *   12  3, the blocks: AP, DATA, TUNING
+ *   16  per block: chip address, length, CRC (the one it carries), offset in the item
+ *   64  the blocks
  */
-#include "ilifw.h"
 #if !ILI_RELEASE_RST
 #error "ILI_DOWNLOAD needs ILI_RELEASE_RST=1 (LK holds the chip in reset)"
 #endif
+
+#define ILI_FW_MAGIC         0x57464c49u          /* "ILFW" */
+
+struct ili_block { const char *name; uint32_t mem, len, crc; const uint8_t *data; };
+static struct ili_block ili_blocks[3];            /* into the payload's item */
+static uint32_t ili_nblocks;                      /* 3 once ili_fw_load() took it, else 0 */
+
+static uint32_t ili_le32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* 1 when m (size bytes; NULL: no item) is good firmware, ili_blocks then pointing into it; else 0 and why on the console */
+static int ili_fw_load(const uint8_t *m, uint32_t size)
+{
+	static const char *const names[3] = { "AP", "DATA", "TUNING" };
+	uint32_t len = m && size >= 64 ? ili_le32(m + 4) : 0, h = 0x811c9dc5u;
+
+	ili_nblocks = 0;
+	if (!m) {
+		out("ili: no ilifw in the payload: touch firmware not sent, no touch\n");
+		return 0;
+	}
+	if (len < 64 || len > size || ili_le32(m) != ILI_FW_MAGIC || ili_le32(m + 12) != 3) {
+		out("ili: the payload's ilifw is not touch firmware: not sent, no touch\n");
+		return 0;
+	}
+	for (uint32_t i = 16; i < len; i++) {
+		h = (h ^ m[i]) * 0x01000193u;
+	}
+	if (h != ili_le32(m + 8)) {
+		out("ili: the payload's ilifw fails its checksum: touch firmware not sent, no touch\n");
+		return 0;
+	}
+	for (uint32_t i = 0; i < 3; i++) {
+		const uint8_t *e = m + 16 + 16 * i;
+		uint32_t bl = ili_le32(e + 4), off = ili_le32(e + 12);
+
+		if (bl < 8 || off < 64 || off > len || bl > len - off) {
+			out("ili: the payload's ilifw has a block out of bounds: touch firmware not sent, no touch\n");
+			return 0;
+		}
+		ili_blocks[i].name = names[i];
+		ili_blocks[i].mem = ili_le32(e);
+		ili_blocks[i].len = bl;
+		ili_blocks[i].crc = ili_le32(e + 8);
+		ili_blocks[i].data = m + off;
+	}
+	ili_nblocks = 3;
+	out("ili: touch firmware from the payload: AP ");
+	out_dec(ili_blocks[0].len);
+	out(", DATA ");
+	out_dec(ili_blocks[1].len);
+	out(", TUNING ");
+	out_dec(ili_blocks[2].len);
+	out(" bytes\n");
+	return 1;
+}
 
 #define ILI_CHUNK            2048                 /* bytes of a block in one SPI write, as the driver */
 static uint8_t ili_buf[5 + ILI_CHUNK + 4];
@@ -350,6 +415,9 @@ static void ili_download(uint32_t report_ms)
 	int good = 1;
 	uint32_t reports = 0, lines = 0, t;
 
+	if (!ili_nblocks) {
+		return;
+	}
 	out("ili: 2. download start (SPI4's pins driven by hand): PLL wake, ICE mode with the MCU stopped\n");
 	ili_bb_begin();
 	if (!ili_bb_xfer(wake, 0, sizeof(wake)) || !ili_bb_xfer(ice_stop, 0, sizeof(ice_stop))) {
@@ -358,7 +426,7 @@ static void ili_download(uint32_t report_ms)
 		return;
 	}
 	dbg_delay_ms(1);
-	for (uint32_t i = 0; i < sizeof(ili_blocks) / sizeof(ili_blocks[0]) && good; i++) {
+	for (uint32_t i = 0; i < ili_nblocks && good; i++) {
 		const struct ili_block *k = &ili_blocks[i];
 		uint8_t b[4] = { 0 };
 		uint32_t dma, iram;
@@ -464,9 +532,9 @@ static void ili_download(uint32_t report_ms)
 
 /*
  * For the kernel's MT6781_ILI, which sends the firmware again when the chip has lost it (as Android's driver does at
- * every display resume): where the firmware's table is, " mp_ili_fw=<address>" on the command line: this loader's own
- * (it stays in memory under XNU, where XNU returns to) or the copy XNU_SHIM makes. With the MMU off addresses are
- * physical.
+ * every display resume): where the firmware's table is, " mp_ili_fw=<address>" on the command line: this loader's own,
+ * pointing into the payload (both stay in memory under XNU, where XNU returns to), or the copy XNU_SHIM makes. With
+ * the MMU off addresses are physical.
  */
 #if XNU_TOUCH_ILI
 static void ili_xnu_args(char *cl, uint64_t table)

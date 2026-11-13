@@ -347,6 +347,8 @@ struct payload_info {
 	uint32_t shim_size;
 	const uint8_t *xnu;             /* XNU_SHIM: the shim's payload (kernel, device tree, command line) */
 	uint32_t xnu_size;
+	const uint8_t *ilifw;           /* the ILI7807S's firmware (mtkili.h) */
+	uint32_t ilifw_size;
 };
 
 /* The XNU symbols the loader works with (kernel virtual addresses, 0 if absent). */
@@ -611,6 +613,9 @@ static int parse_payload(struct payload_info *pi)
 		} else if (strcmp(e->name, "xnu") == 0) {
 			pi->xnu = p + sizeof(*e);
 			pi->xnu_size = e->size;
+		} else if (strcmp(e->name, "ilifw") == 0) {
+			pi->ilifw = p + sizeof(*e);
+			pi->ilifw_size = e->size;
 		}
 		p += sizeof(*e) + ((e->size + 15) & ~15u);
 	}
@@ -2601,7 +2606,7 @@ static uint64_t align16k(uint64_t v)
 /* The touch firmware's table, names and blocks copied to AT (the shim overwrites this program); where the table is. */
 static uint64_t ili_table_copy(uint64_t at)
 {
-	const uint32_t n = sizeof(ili_blocks) / sizeof(ili_blocks[0]);
+	const uint32_t n = ili_nblocks;
 	struct ili_block_copy *t = (struct ili_block_copy *)at;
 	uint64_t p = at + (n * sizeof(*t) + 15) / 16 * 16;
 
@@ -2654,8 +2659,13 @@ static void __attribute__((noreturn)) run_shim(void)
 		chain_android();
 	}
 	uint64_t fw = align16k(rd + pi.xnu_size), end = fw;
-#if XNU_TOUCH_ILI
-	for (uint32_t i = 0; i < sizeof(ili_blocks) / sizeof(ili_blocks[0]); i++) {
+#if XNU_TOUCH_ILI && SOC_IS_MT6781
+	if (pi.ilifw && (uint64_t)pi.ilifw + pi.ilifw_size > rd) {      /* packed after xnu: overwritten below */
+		out("ili: the payload's ilifw lies past the ramdisk's start\n");
+		pi.ilifw = 0;
+	}
+	(void)ili_fw_load(pi.ilifw, pi.ilifw_size);
+	for (uint32_t i = 0; i < ili_nblocks; i++) {
 		end += 32 + 16 + ili_blocks[i].len + 16;
 	}
 #endif
@@ -2678,7 +2688,7 @@ static void __attribute__((noreturn)) run_shim(void)
 	initrd_end_set(end);
 
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
-	if (ili_probe()) {
+	if (ili_nblocks && ili_probe()) {
 		ili_download(0);
 		ili_bb_begin();         /* the pins stay GPIOs, chip select high, for the kernel */
 		(void)ili_table_copy(fw);
@@ -2907,7 +2917,9 @@ static void __attribute__((noreturn)) run_xnu(void)
 	xnu_ufs_args(ba->commandLine);
 #endif
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
-	ili_xnu_args(ba->commandLine, (uint64_t)(uintptr_t)ili_blocks);
+	if (ili_fw_load(pi.ilifw, pi.ilifw_size)) {
+		ili_xnu_args(ba->commandLine, (uint64_t)(uintptr_t)ili_blocks);
+	}
 #endif
 #if XNU_PARK && SOC_IS_MT6781
 	xnu_park_setup(ba->commandLine);
@@ -2995,7 +3007,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 		big_cores_clock();
 	}
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
-	if (ili_probe()) {
+	if (ili_nblocks && ili_probe()) {
 		ili_download(0);
 		ili_bb_begin();         /* the pins stay GPIOs, chip select high, for the kernel (it reads by hand too) */
 	}
@@ -3420,6 +3432,10 @@ void mtkloader_main(uint64_t dtb)
 		out("== mtkloader: ILI7807S touch probe ==\n");
 		if (ili_probe() && ILI_DOWNLOAD) {
 #if ILI_DOWNLOAD
+			struct payload_info pi;
+
+			(void)parse_payload(&pi);
+			(void)ili_fw_load(pi.ilifw, pi.ilifw_size);
 			ili_download(5000);
 #endif
 		}
