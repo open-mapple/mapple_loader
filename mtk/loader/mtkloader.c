@@ -23,7 +23,9 @@
 #include "mtkdbg.h"
 #include "mtkspi.h"
 #include "tcm.h"
+#if !XNU_SHIM
 #include "../../xnuloader/identity.h"   /* made from your IPSW by xnuloader/mkidentity.sh */
+#endif
 
 /* XNU's view of memory: one contiguous range that nothing else (LK, Android, TEE, ATF, the
  * framebuffer) uses; 0xc0000000-0xfe000000 is free DRAM on this board. */
@@ -666,7 +668,9 @@ static uint64_t kva_to_pa(uint64_t va)
 }
 
 
-/* ---- device tree for XNU ---- */
+/* ---- device tree for XNU (the shim takes its own from the payload) ---- */
+
+#if !XNU_SHIM
 
 static void dt_prop(struct dt_writer *w, const char *name, const void *data, uint32_t len)
 {
@@ -936,6 +940,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_end(&w);
 	return (uint32_t)(w.cur - w.base);
 }
+#endif
 
 /* ---- leaving: Android, or a reset ---- */
 
@@ -2172,7 +2177,7 @@ static void timer_probe(void);   /* bringup.h */
  * sees another: it idles for ever, waiting for timeouts that do not come. Clear it here, on the
  * core the kernel is about to run on.
  */
-static void gic_fix_eoimode(void)
+static void __attribute__((unused)) gic_fix_eoimode(void)
 {
 	uint64_t ctlr;
 
@@ -2374,7 +2379,7 @@ void watcher_main(void)
 	wdt_reset();
 }
 
-static void watcher_start(void)
+static void __attribute__((unused)) watcher_start(void)
 {
 	if (!XNU_WATCH_SECONDS) {
 		return;
@@ -2402,7 +2407,7 @@ static void watcher_start(void)
  * on a core the boot loader parked at a third of its speed is worth knowing about before anyone
  * sets about raising it.
  */
-static uint32_t cpu_mhz(void)
+static uint32_t __attribute__((unused)) cpu_mhz(void)
 {
 	uint64_t pmcr, cycles_before, cycles_after, ticks_before, ticks_after, hz = dbg_freq();
 
@@ -2528,7 +2533,7 @@ static uint8_t touch_bring_up_once(void)
  * nothing after the go command -- two runs in four did -- and a fresh start from a reset brings
  * it up; this was what left iOS without a touch screen.
  */
-static uint8_t touch_bring_up(void)
+static uint8_t __attribute__((unused)) touch_bring_up(void)
 {
 	for (int attempt = 1; attempt <= 6; attempt++) {
 		uint8_t mode = touch_bring_up_once();
@@ -2560,7 +2565,7 @@ static uint8_t touch_bring_up(void)
 #define ARMPLL_CON1         0x20c
 #define BIG_MHZ             1176u
 
-static void big_cores_clock(void)
+static void __attribute__((unused)) big_cores_clock(void)
 {
 	uint32_t before = rd32(APMIXED_BASE + ARMPLL_CON1), post = (before >> 24) & 7u;
 	uint32_t pcw = (uint32_t)(((uint64_t)BIG_MHZ << post) * 16384u / 26u);
@@ -2693,6 +2698,7 @@ static void __attribute__((noreturn)) run_shim(void)
 }
 #endif
 
+#if !XNU_SHIM
 static void __attribute__((noreturn)) run_xnu(void)
 {
 	struct payload_info pi;
@@ -3008,6 +3014,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 	jump_to_kernel(kva_to_pa(entry_va), ba_pa);
 	__builtin_unreachable();
 }
+#endif
 
 
 
@@ -3440,6 +3447,7 @@ void mtkloader_main(uint64_t dtb)
 	connsys_dt_report(dtb);         /* Wi-Fi step 1: what Android's tree says of CONNSYS (mtkconnsys.h) */
 #if XNU_SHIM
 	run_shim();
-#endif
+#else
 	run_xnu();
+#endif
 }

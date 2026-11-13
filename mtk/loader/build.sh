@@ -16,7 +16,11 @@ if [ -z "${LLD:-}" ]; then
 	elif [ -x "$ROOT/xnu-deps/host/zig/zig" ]; then LLD="$ROOT/xnu-deps/host/zig/zig ld.lld"
 	else echo "mtkloader: no ld.lld (on the PATH, or zig in xnu-deps/host/zig); give LLD=..." >&2; exit 1; fi
 fi
-[ -f "$ROOT/xnuloader/identity.h" ] || { echo "mtkloader: no xnuloader/identity.h -- xnuloader/mkidentity.sh makes it from your IPSW" >&2; exit 1; }
+# the direct path builds XNU's device tree with the identity made from your IPSW; the shim takes its tree from the payload
+case " $* " in
+*" -DXNU_SHIM=1 "*) ;;
+*) [ -f "$ROOT/xnuloader/identity.h" ] || { echo "mtkloader: no xnuloader/identity.h -- xnuloader/mkidentity.sh makes it from your IPSW" >&2; exit 1; } ;;
+esac
 CFLAGS="--target=aarch64-linux-gnu -ffreestanding -nostdlib -fno-builtin -mgeneral-regs-only -mstrict-align -Os -Wall -Wextra"
 # the SoC's addresses (mtkdbg.h, mtkloader.c): SOC_<CONFIG_SOC> from the tree's .config, if it has one
 SOC=$(sed -n 's/^CONFIG_SOC="\(.*\)"$/\1/p' "$ROOT/.config" 2>/dev/null | tr a-z A-Z)
