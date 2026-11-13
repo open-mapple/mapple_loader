@@ -1940,6 +1940,90 @@ static void dvfs_args(char *cl, uint32_t *tbl)
 	out("\n");
 }
 
+/*
+ * For the kernel's modem driver: LK's /chosen ccci,modem_info_v2 (where LK's modem tags are, how many, LK's load
+ * errors) and the tags themselves, copied to at as they are: the property at +0 (its length at +0, its bytes from +8,
+ * up to 56), the tags from +64. md_info_bytes() says how much room that takes (0: nothing to copy).
+ */
+#define MD_INFO_TAGS_MAX    0x10000u
+
+static uint32_t md_info_tags(uint64_t *base)
+{
+	uint32_t len = 0;
+	uint64_t p = lk_prop(lk_dtb, "chosen", "ccci,modem_info_v2", &len);
+	const volatile uint8_t *b = (const volatile uint8_t *)p;
+	uint32_t size;
+
+	if (p == 0 || len < 12 || len > 56) {
+		return 0;
+	}
+	*base = 0;
+	for (uint32_t i = 0; i < 8; i++) {
+		*base |= (uint64_t)b[i] << (8 * i);
+	}
+	size = (uint32_t)b[8] | (uint32_t)b[9] << 8 | (uint32_t)b[10] << 16 | (uint32_t)b[11] << 24;
+	return size <= MD_INFO_TAGS_MAX ? size : 0;
+}
+
+static uint64_t md_info_bytes(void)
+{
+	uint64_t base;
+	uint32_t size = md_info_tags(&base);
+
+	return size ? 64 + size : 0;
+}
+
+static void md_args(char *cl, uint64_t to)
+{
+	static const char key[] = " mp_md_info=";
+	uint32_t len = 0, size;
+	uint64_t base = 0, p = lk_prop(lk_dtb, "chosen", "ccci,modem_info_v2", &len), v = to;
+	volatile uint8_t *d = (volatile uint8_t *)to;
+	char n10[24];
+	uint32_t at = 0, n = 0;
+
+	size = md_info_tags(&base);
+	if (size == 0) {
+		out("md: no ccci,modem_info_v2 from LK (or tags over 64 KiB): no mp_md_info\n");
+		return;
+	}
+	for (uint32_t i = 0; i < 64; i++) {
+		d[i] = 0;
+	}
+	d[0] = (uint8_t)len;
+	for (uint32_t i = 0; i < len; i++) {
+		d[8 + i] = ((const volatile uint8_t *)p)[i];
+	}
+	for (uint32_t i = 0; i < size; i++) {
+		d[64 + i] = ((const volatile uint8_t *)base)[i];
+	}
+	while (cl[at]) {
+		at++;
+	}
+	do {
+		n10[n++] = (char)('0' + v % 10);
+		v /= 10;
+	} while (v);
+	if (at + sizeof(key) - 1 + n >= BOOT_LINE_LENGTH) {
+		out("md: no room on the command line for mp_md_info=\n");
+		return;
+	}
+	for (uint32_t i = 0; key[i]; i++) {
+		cl[at++] = key[i];
+	}
+	while (n) {
+		cl[at++] = n10[--n];
+	}
+	cl[at] = 0;
+	out("md: LK's modem tags (");
+	out_hex(size);
+	out(" bytes from ");
+	out_hex(base);
+	out(") for the kernel at ");
+	out_hex(to);
+	out("\n");
+}
+
 #if XNU_PARK
 static uint32_t mp_dvfs_tbl[DVFS_TBL_WORDS];
 #endif
@@ -2774,6 +2858,8 @@ static void __attribute__((noreturn)) run_shim(void)
 #endif
 	uint64_t tbl = (end + 15) & ~15ULL;     /* LK's OPP tables, after the most the touch firmware can take */
 	end = tbl + DVFS_TBL_WORDS * 4;
+	uint64_t md = (end + 15) & ~15ULL;      /* LK's modem hand-off */
+	end = md + md_info_bytes();
 	out("shim ");
 	out_dec(pi.shim_size);
 	out(" bytes, MAPPLEPL ");
@@ -2801,6 +2887,7 @@ static void __attribute__((noreturn)) run_shim(void)
 #endif
 	lvts_args((char *)(rd + PAYLOAD_XNU_CMDLINE));     /* this phone's thermal calibration, for viva's LVTS code */
 	dvfs_args((char *)(rd + PAYLOAD_XNU_CMDLINE), (uint32_t *)tbl);
+	md_args((char *)(rd + PAYLOAD_XNU_CMDLINE), md);
 
 	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
 	display_find();
