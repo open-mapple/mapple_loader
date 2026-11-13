@@ -1,7 +1,7 @@
 /*
- * The root partition (the one mp_ufsroot= names): the touch firmware out of the tail at its end. Its last 128 MiB are
- * outside the volume: the saved area, then at end - 64 MiB the tail: settings (1 MiB), the firmware region (15 MiB, a
- * ustar archive: connsys/, touch/), the log.
+ * The root partition (the one mp_ufsroot= names): the check of its HFS+ volume before XNU, and the touch firmware out
+ * of the tail at its end. Its last 128 MiB are outside the volume: the saved area, then at end - 64 MiB the tail:
+ * settings (1 MiB), the firmware region (15 MiB, a ustar archive: connsys/, touch/), the log.
  *
  * Reads go through a root_rd: the partition's bytes from off (a multiple of 512) to the end of off's 4 KiB block, or
  * NULL when they could not be read. The next call may reuse the same memory.
@@ -14,6 +14,64 @@ typedef const volatile uint8_t *(*root_rd)(uint64_t off);
 #define ROOT_ROOM            (128ULL << 20)
 #define TAIL_FW_FROM_END     (63ULL << 20)
 #define TAIL_FW_SIZE         (15ULL << 20)
+
+static uint32_t root_be32(const volatile uint8_t *p)
+{
+	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+/* the volume's size by the HFS+ (or HFSX) volume header h, or 0 when h is none */
+static uint64_t hfs_bytes(const volatile uint8_t *h)
+{
+	uint32_t bs = root_be32(h + 40), total = root_be32(h + 44);
+
+	if (h[0] != 'H' || (h[1] != '+' && h[1] != 'X') || bs < 512 || (bs & (bs - 1)) || total < 4) {
+		return 0;
+	}
+	return (uint64_t)bs * total;
+}
+
+/*
+ * NULL when the partition (part bytes) holds a whole volume: the header at 1 KiB, the alternate header 1 KiB before
+ * the volume's end with the same signature, block size, block count and createDate (a stopped flash has none there, an
+ * earlier image's has another date), and 128 MiB after the volume. Else why not, with *unread 1 when a block could not
+ * be read (the volume may be fine) and 0 when the headers read but are wrong.
+ */
+static const char __attribute__((unused)) *root_check(root_rd rd, uint64_t part, int *unread)
+{
+	const volatile uint8_t *h = rd(1024), *a;
+	uint8_t p[48];
+	uint64_t vol;
+
+	*unread = 1;
+	if (!h) {
+		return "its first block not read";
+	}
+	vol = hfs_bytes(h);
+	*unread = 0;
+	if (!vol) {
+		return "no HFS+ volume header at 1 KiB";
+	}
+	if (vol > part || part - vol < ROOT_ROOM) {
+		return "the volume and 128 MiB do not fit the partition";
+	}
+	for (uint32_t i = 0; i < sizeof(p); i++) {
+		p[i] = h[i];
+	}
+	a = rd(vol - 1024);
+	if (!a) {
+		*unread = 1;
+		return "the alternate header's block not read";
+	}
+	if (a[0] != p[0] || a[1] != p[1]) {
+		return "no alternate HFS+ header at the volume's end (flash not finished)";
+	}
+	if (root_be32(a + 16) != root_be32(p + 16) || root_be32(a + 40) != root_be32(p + 40) ||
+	    root_be32(a + 44) != root_be32(p + 44)) {
+		return "the alternate header is another volume's (stale)";
+	}
+	return 0;
+}
 
 /* an octal field of a tar header (leading spaces, then digits up to a NUL or space); -1 when it is not one */
 static int64_t tar_octal(const volatile uint8_t *f, uint32_t n)

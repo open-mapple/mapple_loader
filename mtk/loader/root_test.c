@@ -1,7 +1,8 @@
 /*
- * The root partition's tail (mtkroot.h) on the host: cc -o /tmp/root_test root_test.c && /tmp/root_test
- * Made-up partitions: the tail's tar (with other members, broken, empty) and which touch firmware wins. On a file
- * standing for the partition (PART bytes; past the file's end reads as zeros): root_test tail FILE PART.
+ * The root partition's checks (mtkroot.h) on the host: cc -o /tmp/root_test root_test.c && /tmp/root_test
+ * Made-up partitions: the HFS+ check (whole, flash stopped, stale alternate header, too big), the tail's tar (with
+ * other members, broken, empty) and which touch firmware wins. On a file standing for the partition (PART bytes; past
+ * the file's end reads as zeros): root_test root FILE PART, root_test tail FILE PART.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -31,7 +32,8 @@ static void dbg_delay_us(uint32_t us) { (void)us; }
 /* the partition: PART bytes, zeros but for a few pieces (or a file) */
 static uint64_t part;
 static struct { uint64_t at; const uint8_t *p; uint64_t n; } piece[4];
-static int pieces, fd = -1, reads;
+static int pieces, fd = -1, reads, unread;
+static uint64_t unreadable = ~0ULL;     /* reads from here on fail, as a UFS error would */
 static uint8_t blk[4096];
 
 static const volatile uint8_t *rd(uint64_t off)
@@ -39,7 +41,7 @@ static const volatile uint8_t *rd(uint64_t off)
 	uint64_t b = off & ~4095ULL;
 
 	reads++;
-	if (off >= part) {
+	if (off >= part || off >= unreadable) {
 		return 0;
 	}
 	memset(blk, 0, sizeof(blk));
@@ -62,6 +64,38 @@ static void expect(const char *what, int ok)
 {
 	printf("  %s: %s\n", what, ok ? "ok" : "FAILED");
 	fails += !ok;
+}
+
+static void be32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v;
+}
+
+/* an HFS+ header block (header at 1024 of a 4 KiB block) */
+static void hfs_hdr(uint8_t *b, uint64_t at, char sig, uint32_t date, uint32_t bs, uint32_t total)
+{
+	uint8_t *h = b + (at & 4095);
+
+	memset(b, 0, 4096);
+	h[0] = 'H';
+	h[1] = (uint8_t)sig;
+	h[3] = sig == '+' ? 4 : 5;
+	be32(h + 16, date);
+	be32(h + 40, bs);
+	be32(h + 44, total);
+}
+
+static const char *hfs_case(char sig, uint32_t date, uint32_t alt_date, int alt, uint64_t vol, uint64_t size)
+{
+	static uint8_t p[4096], a[4096];
+
+	part = size;
+	hfs_hdr(p, 1024, sig, date, 4096, (uint32_t)(vol / 4096));
+	hfs_hdr(a, vol - 1024, sig, alt_date, 4096, (uint32_t)(vol / 4096));
+	piece[0].at = 0, piece[0].p = p, piece[0].n = 4096;
+	piece[1].at = (vol - 1024) & ~4095ULL, piece[1].p = a, piece[1].n = 4096;
+	pieces = alt ? 2 : 1;
+	return root_check(rd, part, &unread);
 }
 
 static int why_is(const char *got, const char *start)
@@ -151,8 +185,13 @@ static int files(int argc, char **argv)
 	fd = open(argv[2], O_RDONLY);
 	part = strtoull(argv[3], 0, 0);
 	if (fd < 0 || part == 0) {
-		fprintf(stderr, "usage: root_test tail FILE PART\n");
+		fprintf(stderr, "usage: root_test root|tail FILE PART\n");
 		return 2;
+	}
+	if (strcmp(argv[1], "root") == 0) {
+		why = root_check(rd, part, &unread);
+		printf("root: %s%s (%d reads)\n", why ? why : "passes", unread ? ", unread" : "", reads);
+		return why != 0;
 	}
 	n = tail_ilifw(rd, part, buf, sizeof(buf), &why);
 	if (!n) {
@@ -176,6 +215,24 @@ int main(int argc, char **argv)
 	if (argc > 3) {
 		return files(argc, argv);
 	}
+	printf("root check\n");
+	expect("whole H+ volume, 128 MiB after it", why_is(hfs_case('+', 7, 7, 1, 64 * MIB, 192 * MIB), 0));
+	expect("whole HX volume, more room", why_is(hfs_case('X', 7, 7, 1, 64 * MIB, 1024 * MIB), 0));
+	expect("flash stopped: no alternate header", why_is(hfs_case('+', 7, 7, 0, 64 * MIB, 192 * MIB), "no alternate"));
+	expect("stale alternate header", why_is(hfs_case('+', 7, 8, 1, 64 * MIB, 192 * MIB), "the alternate header is"));
+	expect("no 128 MiB after the volume", why_is(hfs_case('+', 7, 7, 1, 65 * MIB, 192 * MIB), "the volume and 128"));
+	expect("headers read but wrong: not unread", why_is(hfs_case('+', 7, 8, 1, 64 * MIB, 192 * MIB), "the alternate") &&
+	    !unread);
+	unreadable = 0;
+	expect("first block unread", why_is(hfs_case('+', 7, 7, 1, 64 * MIB, 192 * MIB), "its first block") && unread);
+	unreadable = 4096;
+	expect("alternate header unread", why_is(hfs_case('+', 7, 7, 1, 64 * MIB, 192 * MIB), "the alternate header's block") &&
+	    unread);
+	unreadable = ~0ULL;
+	expect("volume past the partition", why_is(hfs_case('+', 7, 7, 1, 400 * MIB, 192 * MIB), "the volume and 128"));
+	pieces = 0;
+	expect("no header", why_is(root_check(rd, part, &unread), "no HFS+") && !unread);
+
 	printf("tail\n");
 	make_item();
 	memset(big, 0x5a, sizeof(big));

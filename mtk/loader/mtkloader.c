@@ -178,8 +178,16 @@ static void xnu_ufs_args(char *cl);
 #ifndef XNU_SHIM
 #define XNU_SHIM            0
 #endif
-/* reads of the root partition (mp_ufsroot=): the touch firmware from its tail when the payload has none */
-#define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && XNU_TOUCH_ILI)
+/* 1 (with XNU_SHIM): XNU at every boot when the root partition (mp_ufsroot=) passes its check (mtkroot.h), else Android
+ * with the reason on the console; the single-boot product's loader. 0: XNU only when asked (volume down). */
+#ifndef XNU_DEFAULT
+#define XNU_DEFAULT         0
+#endif
+#if XNU_DEFAULT && !(XNU_SHIM && SOC_IS_MT6781)
+#error "XNU_DEFAULT needs XNU_SHIM=1 (the root partition's name is on the shim's command line)"
+#endif
+/* reads of the root partition: its check, and the touch firmware from its tail when the payload has none */
+#define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && (XNU_DEFAULT || XNU_TOUCH_ILI))
 /* 1: check at EL1 that the timer interrupts arrive at all (diagnostics, leaves GIC state). */
 #ifndef TIMER_PROBE
 #define TIMER_PROBE         0
@@ -2595,6 +2603,9 @@ static void __attribute__((unused)) big_cores_clock(void)
 #if ROOT_READS
 #include "mtkroot.h"
 #endif
+#if XNU_DEFAULT
+static int root_ok(void);
+#endif
 #if ROOT_READS && XNU_TOUCH_ILI
 static uint8_t ili_tail_buf[128 << 10] __attribute__((aligned(16)));
 static uint32_t ili_tail(void);
@@ -3106,7 +3117,7 @@ static int volume_down_held(const char *what)
 	return 0;
 }
 
-static int xnu_requested(void)
+static int __attribute__((unused)) xnu_requested(void)
 {
 	int asked = pmsg_take(boot_xnu_flag, sizeof(boot_xnu_flag) - 1);
 
@@ -3116,11 +3127,15 @@ static int xnu_requested(void)
 
 static int boot_choice(void)
 {
+#if XNU_DEFAULT
+	int xnu = root_ok();
+#else
 	int xnu = MENU_DEFAULT_XNU || xnu_requested();
+#endif
 	uint64_t screen = fbc.base;
 
 	fbc.base = 0;
-	dbg_puts(xnu ? "boot: Darwin / XNU (requested)\n" : "boot: Android\n");
+	dbg_puts(xnu ? (XNU_DEFAULT ? "boot: Darwin / XNU\n" : "boot: Darwin / XNU (requested)\n") : "boot: Android\n");
 	fbc.base = screen;
 	fb_rect(0, 600, PANEL_W, 160, 0xff000000u);
 	fbc.scale = 3;
@@ -3370,6 +3385,52 @@ static uint64_t root_part(const char **why)
 	rp_first = first;
 	rp_count = last - first + 1;
 	return rp_count * UFS_BLOCK;
+}
+#endif
+
+#if XNU_DEFAULT
+/*
+ * The root check (mtkroot.h): 1 XNU, 0 Android (only when its headers were read and are wrong). Anything else (UFS,
+ * GPT, the command line) is tried three times, then stops here with the reason on the screen: Android would format
+ * the root partition.
+ */
+static int root_ok(void)
+{
+	const char *why = 0;
+	int unread = 1;
+
+	for (int tries = 0; tries < 3 && unread; tries++) {
+		uint64_t part = root_part(&why);
+
+		unread = 1;
+		if (part) {
+			why = root_check(rp_read, part, &unread);
+		}
+		out("root: ");
+		if (rp_name[0]) {
+			out(rp_name);
+			out(": ");
+		}
+		out(why ? why : "HFS+ volume whole, 128 MiB after it");
+		out(!unread ? (why ? "; Android\n" : "; XNU\n") : tries < 2 ? "; again\n" : "; stopped\n");
+		if (unread && tries < 2) {
+			dbg_delay_ms(500);
+		}
+	}
+	if (unread) {
+		fb_rect(0, 600, PANEL_W, 160, 0xff000000u);
+		fbc.scale = 3;
+		fbc.x = 48;
+		fbc.y = 640;
+		fbc.fg = 0xffff4040u;
+		for (const char *c = "Root not read: hold Power"; *c; c++) {
+			fbcon_putc(*c);
+		}
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
+	return why == 0;
 }
 #endif
 
