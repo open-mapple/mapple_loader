@@ -231,8 +231,8 @@ static int ili_probe(void)
  * then the firmware version asked for, and report_ms of reports. All of it with the pins driven by hand, as above
  * (the Hot 20's SPI2 would not finish twice in a row either: mtkspi.h).
  *
- * The firmware is the payload's item "ilifw", made by mtk/tools/mkilifw.py from YOUR phone's firmware file and never
- * committed. Little-endian:
+ * The firmware is the payload's item "ilifw", else touch/ilifw.bin in the root partition's tail (mtkroot.h), made by
+ * mtk/tools/mkilifw.py from YOUR phone's firmware file and never committed. Little-endian:
  *   0   "ILFW"
  *   4   the item's length
  *   8   FNV-1a (32 bits) of its bytes from 16 on
@@ -255,8 +255,9 @@ static uint32_t ili_le32(const uint8_t *p)
 	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-/* 1 when m (size bytes; NULL: no item) is good firmware, ili_blocks then pointing into it; else 0 and why on the console */
-static int ili_fw_load(const uint8_t *m, uint32_t size)
+/* 1 when m (size bytes; NULL: no item) is good firmware, ili_blocks then pointing into it; else 0 and why on the console.
+ * from: where m came from ("payload", "tail"), for those lines. */
+static int ili_fw_load(const uint8_t *m, uint32_t size, const char *from)
 {
 	static const char *const names[3] = { "AP", "DATA", "TUNING" };
 	uint32_t len = m && size >= 64 ? ili_le32(m + 4) : 0, h = 0x811c9dc5u;
@@ -267,14 +268,18 @@ static int ili_fw_load(const uint8_t *m, uint32_t size)
 		return 0;
 	}
 	if (len < 64 || len > size || ili_le32(m) != ILI_FW_MAGIC || ili_le32(m + 12) != 3) {
-		out("ili: the payload's ilifw is not touch firmware: not sent, no touch\n");
+		out("ili: the ");
+		out(from);
+		out("'s ilifw is not touch firmware: not sent, no touch\n");
 		return 0;
 	}
 	for (uint32_t i = 16; i < len; i++) {
 		h = (h ^ m[i]) * 0x01000193u;
 	}
 	if (h != ili_le32(m + 8)) {
-		out("ili: the payload's ilifw fails its checksum: touch firmware not sent, no touch\n");
+		out("ili: the ");
+		out(from);
+		out("'s ilifw fails its checksum: touch firmware not sent, no touch\n");
 		return 0;
 	}
 	for (uint32_t i = 0; i < 3; i++) {
@@ -282,7 +287,9 @@ static int ili_fw_load(const uint8_t *m, uint32_t size)
 		uint32_t bl = ili_le32(e + 4), off = ili_le32(e + 12);
 
 		if (bl < 8 || off < 64 || off > len || bl > len - off) {
-			out("ili: the payload's ilifw has a block out of bounds: touch firmware not sent, no touch\n");
+			out("ili: the ");
+			out(from);
+			out("'s ilifw has a block out of bounds: touch firmware not sent, no touch\n");
 			return 0;
 		}
 		ili_blocks[i].name = names[i];
@@ -292,7 +299,9 @@ static int ili_fw_load(const uint8_t *m, uint32_t size)
 		ili_blocks[i].data = m + off;
 	}
 	ili_nblocks = 3;
-	out("ili: touch firmware from the payload: AP ");
+	out("ili: touch firmware from the ");
+	out(from);
+	out(": AP ");
 	out_dec(ili_blocks[0].len);
 	out(", DATA ");
 	out_dec(ili_blocks[1].len);

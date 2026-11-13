@@ -65,28 +65,28 @@ static void expect(const char *what, int got, int want)
 int main(int argc, char **argv)
 {
 	make();
-	expect("good", ili_fw_load(item, sizeof(item)) && ili_nblocks == 3 && ili_blocks[2].mem == 0x40000 &&
+	expect("good", ili_fw_load(item, sizeof(item), "payload") && ili_nblocks == 3 && ili_blocks[2].mem == 0x40000 &&
 	    ili_blocks[1].crc == 0x1235 && ili_blocks[2].data == item + 128 && strcmp(ili_blocks[0].name, "AP") == 0, 1);
-	expect("missing", ili_fw_load(NULL, 0) || ili_nblocks, 0);
+	expect("missing", ili_fw_load(NULL, 0, "payload") || ili_nblocks, 0);
 	item[100] ^= 1;
-	expect("a firmware byte flipped", ili_fw_load(item, sizeof(item)) || ili_nblocks, 0);
+	expect("a firmware byte flipped", ili_fw_load(item, sizeof(item), "payload") || ili_nblocks, 0);
 	make();
 	item[8] ^= 1;
-	expect("bad checksum", ili_fw_load(item, sizeof(item)), 0);
+	expect("bad checksum", ili_fw_load(item, sizeof(item), "payload"), 0);
 	make();
-	expect("item cut short", ili_fw_load(item, sizeof(item) - 16), 0);
+	expect("item cut short", ili_fw_load(item, sizeof(item) - 16, "payload"), 0);
 	item[0] = 'X';
-	expect("bad magic", ili_fw_load(item, sizeof(item)), 0);
+	expect("bad magic", ili_fw_load(item, sizeof(item), "payload"), 0);
 	make();
 	put32(item + 28 + 32, sizeof(item) - 16);
 	seal();
-	expect("block past the end", ili_fw_load(item, sizeof(item)), 0);
+	expect("block past the end", ili_fw_load(item, sizeof(item), "payload"), 0);
 	if (argc > 1) {
 		static uint8_t f[256 * 1024] __attribute__((aligned(16)));
 		FILE *fp = fopen(argv[1], "rb");
 		size_t n = fp ? fread(f, 1, sizeof(f), fp) : 0;
 
-		expect(argv[1], ili_fw_load(f, (uint32_t)n), 1);
+		expect(argv[1], ili_fw_load(f, (uint32_t)n, "payload"), 1);
 		for (uint32_t i = 0; i < ili_nblocks; i++) {
 			const struct ili_block *k = &ili_blocks[i];
 			const uint8_t *e = k->data + k->len - 4;

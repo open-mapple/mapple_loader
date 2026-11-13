@@ -178,6 +178,8 @@ static void xnu_ufs_args(char *cl);
 #ifndef XNU_SHIM
 #define XNU_SHIM            0
 #endif
+/* reads of the root partition (mp_ufsroot=): the touch firmware from its tail when the payload has none */
+#define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && XNU_TOUCH_ILI)
 /* 1: check at EL1 that the timer interrupts arrive at all (diagnostics, leaves GIC state). */
 #ifndef TIMER_PROBE
 #define TIMER_PROBE         0
@@ -2590,6 +2592,13 @@ static void __attribute__((unused)) big_cores_clock(void)
 
 #if XNU_SHIM
 #define PAYLOAD_XNU_CMDLINE 0x48        /* the command line's offset in a MAPPLEPL payload (shim/loader.c) */
+#if ROOT_READS
+#include "mtkroot.h"
+#endif
+#if ROOT_READS && XNU_TOUCH_ILI
+static uint8_t ili_tail_buf[128 << 10] __attribute__((aligned(16)));
+static uint32_t ili_tail(void);
+#endif
 
 struct ili_block_copy {                 /* struct ili_block as it lies in memory */
 	uint64_t name;
@@ -2664,7 +2673,12 @@ static void __attribute__((noreturn)) run_shim(void)
 		out("ili: the payload's ilifw lies past the ramdisk's start\n");
 		pi.ilifw = 0;
 	}
-	(void)ili_fw_load(pi.ilifw, pi.ilifw_size);
+	{
+		const uint8_t *item = pi.ilifw;
+
+		pi.ilifw = ili_pick(item, pi.ilifw_size, ili_tail, ili_tail_buf, &pi.ilifw_size);
+		(void)ili_fw_load(pi.ilifw, pi.ilifw_size, pi.ilifw && !item ? "tail" : "payload");
+	}
 	for (uint32_t i = 0; i < ili_nblocks; i++) {
 		end += 32 + 16 + ili_blocks[i].len + 16;
 	}
@@ -2917,7 +2931,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 	xnu_ufs_args(ba->commandLine);
 #endif
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
-	if (ili_fw_load(pi.ilifw, pi.ilifw_size)) {
+	if (ili_fw_load(pi.ilifw, pi.ilifw_size, "payload")) {
 		ili_xnu_args(ba->commandLine, (uint64_t)(uintptr_t)ili_blocks);
 	}
 #endif
@@ -3123,11 +3137,11 @@ static int boot_choice(void)
 }
 
 
-#if (UFS_PROBE || XNU_UFS) && SOC_IS_MT6781
+#if ((UFS_PROBE || XNU_UFS) && SOC_IS_MT6781) || ROOT_READS
 #define UFSHCI_BASE         0x11270000ULL
 #endif
 
-#if (UFS_READ_TEST || XNU_UFS) && SOC_IS_MT6781
+#if ((UFS_READ_TEST || XNU_UFS) && SOC_IS_MT6781) || ROOT_READS
 /*
  * Reads, the UFSHCI way (JESD223; Linux's ufshcd lays it out the same): a UTP transfer request descriptor in slot 0
  * of LK's list, pointing at a command descriptor here -- the COMMAND UPIU at 0, the RESPONSE UPIU at 512, one PRDT
@@ -3253,6 +3267,136 @@ static uint64_t ufs_le(const volatile uint8_t *p, int n)
 	}
 	return v;
 }
+
+/* a partition's first and last block among the GPT's entries in ufs_data, or 0, 0 */
+static void __attribute__((unused)) ufs_gpt_find(const char *name, uint32_t count, uint32_t size, uint64_t *first, uint64_t *last)
+{
+	const volatile uint8_t *d = ufs_data;
+
+	*first = *last = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		const volatile uint8_t *e = d + i * size;
+		uint32_t k;
+
+		for (k = 0; name[k] && e[56 + 2 * k] == (uint8_t)name[k] && e[57 + 2 * k] == 0; k++) {
+		}
+		if (name[k] == 0 && e[56 + 2 * k] == 0 && e[57 + 2 * k] == 0) {
+			*first = ufs_le(e + 32, 8);
+			*last = ufs_le(e + 40, 8);
+			return;
+		}
+	}
+}
+#endif
+
+#if ROOT_READS
+/* the root partition, as mp_ufsroot= on the payload's command line names it, in LUN 2's GPT; read through LK's list */
+static char rp_name[36];
+static uint64_t rp_utrl, rp_first, rp_count, rp_lba, rp_n;
+
+/* a root_rd (mtkroot.h): up to four blocks at a time into ufs_data, kept for the next call */
+static const volatile uint8_t *rp_read(uint64_t off)
+{
+	uint64_t b = off / UFS_BLOCK;
+
+	if (b >= rp_count) {
+		return 0;
+	}
+	if (rp_n == 0 || b < rp_lba || b >= rp_lba + rp_n) {
+		uint32_t n = rp_count - b < 4 ? (uint32_t)(rp_count - b) : 4;
+
+		rp_n = 0;
+		if (ufs_lk_read(rp_utrl, (uint32_t)(rp_first + b), n) != 0) {
+			return 0;
+		}
+		rp_lba = b;
+		rp_n = n;
+	}
+	return ufs_data + (b - rp_lba) * UFS_BLOCK + off % UFS_BLOCK;
+}
+
+/* the root partition's bytes, rp_read then reading it; 0 and *why when it is not found */
+static uint64_t root_part(const char **why)
+{
+	struct payload_info pi;
+	const volatile uint8_t *d = ufs_data;
+	const char *cl;
+	uint64_t alt, entries, first = 0, last = 0;
+	uint32_t count, size, i, n = 0;
+
+	rp_name[0] = 0;
+	rp_n = rp_count = 0;
+	(void)parse_payload(&pi);
+	if (!pi.xnu || pi.xnu_size < PAYLOAD_XNU_CMDLINE + BOOT_LINE_LENGTH) {
+		*why = "no MAPPLEPL command line";
+		return 0;
+	}
+	cl = (const char *)pi.xnu + PAYLOAD_XNU_CMDLINE;
+	for (i = 0; i + 11 < BOOT_LINE_LENGTH && cl[i]; i++) {
+		if ((i == 0 || cl[i - 1] == ' ') && memcmp_n(cl + i, "mp_ufsroot=", 11) == 0) {
+			for (i += 11; i < BOOT_LINE_LENGTH && cl[i] && cl[i] != ' ' && n < sizeof(rp_name); i++) {
+				rp_name[n++] = cl[i];
+			}
+			break;
+		}
+	}
+	if (n == sizeof(rp_name)) {
+		n = 0;
+	}
+	rp_name[n] = 0;
+	if (n == 0) {
+		*why = "no mp_ufsroot= in the boot-args";
+		return 0;
+	}
+	rp_utrl = ufs_lk_list();
+	if (rp_utrl == 0 || ufs_lk_read(rp_utrl, 1, 1) != 0 || memcmp_n(d, "EFI PART", 8) != 0) {
+		*why = "no GPT header at LBA 1 of LUN 2";
+		return 0;
+	}
+	alt = ufs_le(d + 32, 8);
+	entries = ufs_le(d + 72, 8);
+	count = (uint32_t)ufs_le(d + 80, 4);
+	size = (uint32_t)ufs_le(d + 84, 4);
+	if (size != 128 || count == 0 || count > 128 || entries < 2 || entries + 4 > alt ||
+	    ufs_lk_read(rp_utrl, (uint32_t)entries, (count * size + UFS_BLOCK - 1) / UFS_BLOCK) != 0) {
+		*why = "the GPT's entries not read";
+		return 0;
+	}
+	ufs_gpt_find(rp_name, count, size, &first, &last);
+	if (first < entries + 4 || last < first || last >= alt || last > 0xffffffffULL) {
+		*why = "not in the GPT";
+		return 0;
+	}
+	rp_first = first;
+	rp_count = last - first + 1;
+	return rp_count * UFS_BLOCK;
+}
+#endif
+
+#if ROOT_READS && XNU_TOUCH_ILI
+/* touch/ilifw.bin from the root partition's tail into ili_tail_buf: its size, or 0 */
+static uint32_t ili_tail(void)
+{
+	const char *why = 0;
+	uint64_t part = root_part(&why);
+	uint32_t n = part ? tail_ilifw(rp_read, part, ili_tail_buf, sizeof(ili_tail_buf), &why) : 0;
+
+	out(n ? "ili: touch/ilifw.bin from the tail" : "ili: no touch/ilifw.bin from the tail");
+	if (rp_name[0]) {
+		out(" of ");
+		out(rp_name);
+	}
+	if (n) {
+		out(", ");
+		out_dec(n);
+		out(" bytes\n");
+	} else {
+		out(": ");
+		out(why);
+		out("\n");
+	}
+	return n;
+}
 #endif
 
 #if XNU_UFS && SOC_IS_MT6781
@@ -3279,26 +3423,6 @@ static char *cl_dec(char *at, uint64_t v)
 	}
 	*at = 0;
 	return at;
-}
-
-/* a partition's first and last block among the GPT's entries in ufs_data, or 0, 0 */
-static void ufs_gpt_find(const char *name, uint32_t count, uint32_t size, uint64_t *first, uint64_t *last)
-{
-	const volatile uint8_t *d = ufs_data;
-
-	*first = *last = 0;
-	for (uint32_t i = 0; i < count; i++) {
-		const volatile uint8_t *e = d + i * size;
-		uint32_t k;
-
-		for (k = 0; name[k] && e[56 + 2 * k] == (uint8_t)name[k] && e[57 + 2 * k] == 0; k++) {
-		}
-		if (name[k] == 0 && e[56 + 2 * k] == 0 && e[57 + 2 * k] == 0) {
-			*first = ufs_le(e + 32, 8);
-			*last = ufs_le(e + 40, 8);
-			return;
-		}
-	}
 }
 
 /*
@@ -3435,7 +3559,7 @@ void mtkloader_main(uint64_t dtb)
 			struct payload_info pi;
 
 			(void)parse_payload(&pi);
-			(void)ili_fw_load(pi.ilifw, pi.ilifw_size);
+			(void)ili_fw_load(pi.ilifw, pi.ilifw_size, "payload");
 			ili_download(5000);
 #endif
 		}
