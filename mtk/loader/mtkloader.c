@@ -3608,7 +3608,7 @@ static void menu_puts(const char *s)
  * yet. The menu's two args do no harm from a stale record, and mp_menu_secs is clamped so that Android stays
  * reachable.
  */
-static void split_record_args(uint64_t part, int *xnu, uint32_t *secs)
+static void split_record_args(uint64_t part, int *xnu, uint32_t *secs, int *pmic)
 {
 	static struct bootrec_rec rec;
 	const volatile uint8_t *b = part >= BOOTREC_TAIL_BLOCKS * UFS_BLOCK ?
@@ -3622,7 +3622,7 @@ static void split_record_args(uint64_t part, int *xnu, uint32_t *secs)
 	}
 	if (bootrec_valid(&rec, rec.base_hash)) {
 		menu_log("menu: mp_menu_ args from the boot-args record\n");
-		menu_args(rec.cmdline, BOOTREC_LINE, xnu, secs);
+		menu_args(rec.cmdline, BOOTREC_LINE, xnu, secs, pmic);
 	}
 }
 
@@ -3653,7 +3653,7 @@ static void menu_draw(int sel, int counting, uint32_t left, int pmic)
 	}
 	if (!pmic) {
 		fbc.y = 936;
-		menu_puts("Power unreadable: timeout");
+		menu_puts("No Power key: the timeout starts");
 	}
 	fbc.scale = 1;
 }
@@ -3672,10 +3672,13 @@ static int split_menu(void)
 	if (parse_payload(&pi) && pi.xnu && memcmp_n(pi.xnu, "MAPPLEPL", 8) == 0) {
 		line = (const char *)pi.xnu + PAYLOAD_XNU_CMDLINE;
 	}
-	menu_args(line, BOOTREC_LINE, &xnu, &secs);
+	menu_args(line, BOOTREC_LINE, &xnu, &secs, &pmic);
 	part = root_part(&why);
 	if (part && !(line && menu_arg(line, BOOTREC_LINE, "mp_bootrec=", v, sizeof(v)) && v[0] == '0')) {
-		split_record_args(part, &xnu, &secs);
+		split_record_args(part, &xnu, &secs, &pmic);
+	}
+	if (!pmic) {
+		menu_log("menu: mp_menu_pmic=0: volume down and the timeout only, no PMIC reads\n");
 	}
 	sel = xnu;
 	if (pmsg_take(boot_xnu_flag, sizeof(boot_xnu_flag) - 1)) {
@@ -3701,9 +3704,11 @@ static int split_menu(void)
 				break;
 			}
 			if (moved) {
+				/* without Power the timeout is what starts the choice: it begins again */
 				sel ^= 1;
-				counting = 0;
-				menu_draw(sel, counting, 0, pmic);
+				counting = !pmic;
+				ticks = secs * 50;
+				menu_draw(sel, counting, secs, pmic);
 			} else if (counting) {
 				if (--ticks == 0) {
 					break;

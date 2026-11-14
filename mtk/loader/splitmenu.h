@@ -35,8 +35,9 @@ static int menu_arg(const volatile char *cl, uint32_t max, const char *name, cha
 	return 0;
 }
 
-/* mp_menu_default=android|ios and mp_menu_secs=N from line (0 when there is none): into *xnu and *secs if given */
-static void menu_args(const volatile char *cl, uint32_t max, int *xnu, uint32_t *secs)
+/* mp_menu_default=android|ios, mp_menu_secs=N and mp_menu_pmic=0 (volume up and Power not read) from line (0 when
+ * there is none): into *xnu, *secs and *pmic if given */
+static void menu_args(const volatile char *cl, uint32_t max, int *xnu, uint32_t *secs, int *pmic)
 {
 	char v[8];
 
@@ -57,6 +58,9 @@ static void menu_args(const volatile char *cl, uint32_t max, int *xnu, uint32_t 
 			s = s * 10 + (uint32_t)(v[i] - '0');
 		}
 		*secs = s < MENU_SECS_MIN ? MENU_SECS_MIN : s > MENU_SECS_MAX ? MENU_SECS_MAX : s;
+	}
+	if (menu_arg(cl, max, "mp_menu_pmic=", v, sizeof(v)) && (v[0] == '0' || v[0] == '1') && !v[1]) {
+		*pmic = v[0] == '1';
 	}
 }
 
