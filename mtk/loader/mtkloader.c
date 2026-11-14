@@ -195,8 +195,13 @@ static void xnu_ufs_args(char *cl);
 #if SPLIT_MENU && !(XNU_SHIM && SOC_IS_MT6781 && !XNU_DEFAULT && !MENU_DEFAULT_XNU)
 #error "SPLIT_MENU needs XNU_SHIM=1 on the MT6781, without XNU_DEFAULT or MENU_DEFAULT_XNU"
 #endif
-/* reads of the root partition: its check, the menu's record, and the touch firmware from its tail when the payload has
- * none */
+/* 1: a release build (mka's user variant): no log on the screen before XNU's logo, only the banner "Booting Open
+ * Mapple" ("Safe boot" under it in safe mode); a failure still puts its lines on the screen. 0: everything on it. */
+#ifndef MAPPLE_RELEASE
+#define MAPPLE_RELEASE      0
+#endif
+/* reads of the root partition: its check, the menu's record, the safe-next-boot mark, and the touch firmware from its
+ * tail when the payload has none */
 #define ROOT_READS          (XNU_SHIM && SOC_IS_MT6781 && (XNU_DEFAULT || XNU_TOUCH_ILI || SPLIT_MENU))
 /* 1: check at EL1 that the timer interrupts arrive at all (diagnostics, leaves GIC state). */
 #ifndef TIMER_PROBE
@@ -483,14 +488,61 @@ static void uart_putc(char c)
 	wr32(MT6768_UART_BASE, (uint8_t)c);
 }
 
+static int log_on_screen = !MAPPLE_RELEASE;
+
 static void out_putc(char c)
 {
 	if (c == '\n') {
 		uart_putc('\r');
 	}
 	uart_putc(c);
-	dbg_putc(c);
+	if (log_on_screen) {
+		dbg_putc(c);
+	} else {
+		plog_putc(c);
+	}
 }
+
+/* A failure: from here the log is on the screen in a release build too, from row y down. */
+static void fail_screen(uint32_t y)
+{
+	if (log_on_screen) {
+		return;
+	}
+	fb_rect(0, y, PANEL_W, PANEL_H - y, 0xff000000u);
+	fbc.scale = 1;
+	fbc.x = 0;
+	fbc.y = fbc.top = y;
+	fbc.fg = 0xffffffffu;
+	log_on_screen = 1;
+}
+
+#if MAPPLE_RELEASE
+static int safe_banner;
+
+/* the release screen: black, "Booting Open Mapple", "Safe boot" under it in safe mode */
+static void release_banner(void)
+{
+	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
+	fbc.scale = 3;
+	fbc.x = 48;
+	fbc.y = 640;
+	fbc.fg = 0xff40ff40u;
+	for (const char *c = "Booting Open Mapple"; *c; c++) {
+		fbcon_putc(*c);
+	}
+	if (safe_banner) {
+		fbc.x = 48;
+		fbc.y = 720;
+		fbc.fg = 0xffffffffu;
+		for (const char *c = "Safe boot"; *c; c++) {
+			fbcon_putc(*c);
+		}
+	}
+	fbc.scale = 1;
+	fbc.fg = 0xffffffffu;
+}
+#endif
 
 static void out(const char *s)
 {
@@ -1697,7 +1749,7 @@ static uint32_t mp_lvts_golden;                    /* 0: not known */
  * line in the 2 GB layout, with Metal at boot turned back into the bare driver and Wi-Fi and Bluetooth left off
  * (mp_gpu=2 becomes mp_gpu=1, mp_wifi_steps and mp_bt_steps become 0, each in place: the first occurrence of a boot-arg
  * is the one XNU reads). Let go (three samples up) and the window closes: a normal boot. Keypad bit as
- * volume_down_held().
+ * volume_down_held(). The boot-args record's safe-next-boot mark (Mapple) does the same without the window.
  */
 /* name (with its '=') at a word's start followed by one digit, `from` or any digit if from is 0: that digit becomes `to` */
 static void arg_digit(char *cl, const char *name, char from, char to)
@@ -1719,28 +1771,33 @@ static void arg_digit(char *cl, const char *name, char from, char to)
 	}
 }
 
-static void safe_boot_args(char *cl)
+static void safe_boot_args(char *cl, int marked)
 {
 	uint32_t pressed = 0, released = 0;
 	char *at = cl;
 
-	out("safe boot (the payload's own line, no boot record): keep holding volume down (3 s)\n");
-	for (uint32_t t = 0; t < 30 && released < 3; t++) {
-		if (rd32(0x10010004ULL) & (1u << 1)) {
-			released++;
-		} else {
-			pressed++;
-			released = 0;
+	if (marked) {
+		out("safe boot: the boot-args record's safe-next-boot mark\n");
+	} else {
+		out("safe boot (the payload's own line, no boot record): keep holding volume down (3 s)\n");
+		for (uint32_t t = 0; t < 30 && released < 3; t++) {
+			if (rd32(0x10010004ULL) & (1u << 1)) {
+				released++;
+			} else {
+				pressed++;
+				released = 0;
+			}
+			dbg_delay_ms(100);
 		}
-		dbg_delay_ms(100);
-	}
-	if (pressed < 27) {
-		return;
+		if (pressed < 27) {
+			return;
+		}
 	}
 	while (*at) {
 		at++;
 	}
 	if ((uint32_t)(at - cl) + 25 >= BOOT_LINE_LENGTH) {
+		fail_screen(800);
 		out("safe boot: no room on the command line\n");
 		return;
 	}
@@ -1752,6 +1809,10 @@ static void safe_boot_args(char *cl)
 	arg_digit(cl, "mp_wifi_steps=", 0, '0');
 	arg_digit(cl, "mp_bt_steps=", 0, '0');
 	out("safe boot: mp_bootrec=0 mp_mem4g=0 mp_gpu=1 mp_wifi_steps=0 mp_bt_steps=0\n");
+#if MAPPLE_RELEASE
+	safe_banner = 1;
+	release_banner();
+#endif
 }
 
 static void lvts_args(char *cl)
@@ -2612,6 +2673,12 @@ static void __attribute__((unused)) big_cores_clock(void)
 #define PAYLOAD_XNU_CMDLINE 0x48        /* the command line's offset in a MAPPLEPL payload (shim/loader.c) */
 #if ROOT_READS
 #include "mtkroot.h"
+#include "../../shim/bootrec.h"
+static uint64_t root_part(const char **why);
+static const volatile uint8_t *rp_read(uint64_t off);
+static int record_safe(void);
+#else
+#define record_safe() 0
 #endif
 #if XNU_DEFAULT
 static int root_ok(void);
@@ -2684,6 +2751,7 @@ static void __attribute__((noreturn)) run_shim(void)
 		rd = fdt_get(at);
 	}
 	if (!pi.shim || !pi.xnu || !rd || memcmp_n(pi.xnu, "MAPPLEPL", 8) != 0) {
+		fail_screen(800);
 		out("ERROR: no shim, MAPPLEPL payload or ramdisk address\n");
 		dbg_delay_ms(5000);
 		chain_android();
@@ -2714,12 +2782,13 @@ static void __attribute__((noreturn)) run_shim(void)
 	out_hex(rd);
 	out("\n");
 	if ((uint64_t)pi.xnu + pi.xnu_size > rd || end > lk_dtb) {   /* LK's tree follows the ramdisk's room */
+		fail_screen(800);
 		out("ERROR: the payload and the touch firmware do not fit before LK's tree\n");
 		dbg_delay_ms(5000);
 		chain_android();
 	}
 	memcpy((void *)rd, pi.xnu, pi.xnu_size);
-	safe_boot_args((char *)(rd + PAYLOAD_XNU_CMDLINE));
+	safe_boot_args((char *)(rd + PAYLOAD_XNU_CMDLINE), record_safe());
 	initrd_end_set(end);
 
 #if XNU_TOUCH_ILI && SOC_IS_MT6781
@@ -2736,6 +2805,12 @@ static void __attribute__((noreturn)) run_shim(void)
 	/* LK scans one of its three buffers; the shim and XNU draw into the first, so that one is scanned */
 	display_find();
 	display_alpha_off();
+#if MAPPLE_RELEASE
+	if (fb_base != LK_FB_BASE) {    /* the banner where the shim and XNU draw (nothing else clears that buffer) */
+		fbc.base = LK_FB_BASE;
+		release_banner();
+	}
+#endif
 	wr32(OVL0_BASE + OVL_FB(OVL_L0_ADDR), (uint32_t)LK_FB_BASE);
 	out("\nstarting the shim\n");
 	marker_set(0);
@@ -2750,6 +2825,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 	struct xnu_syms s;
 
 	if (!parse_payload(&pi)) {
+		fail_screen(800);
 		out("ERROR: no XNU payload in this image\n");
 		dbg_delay_ms(5000);
 		chain_android();
@@ -3153,7 +3229,16 @@ static int boot_choice(void)
 	fbc.base = 0;
 	dbg_puts(xnu ? (XNU_DEFAULT ? "boot: Darwin / XNU\n" : "boot: Darwin / XNU (requested)\n") : "boot: Android\n");
 	fbc.base = screen;
+#if MAPPLE_RELEASE
+	if (xnu) {
+		release_banner();
+		dbg_delay_ms(1000);
+		return xnu;
+	}
+	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
+#else
 	fb_rect(0, 600, PANEL_W, 160, 0xff000000u);
+#endif
 	fbc.scale = 3;
 	fbc.x = 48;
 	fbc.y = 640;
@@ -3402,6 +3487,24 @@ static uint64_t root_part(const char **why)
 	rp_count = last - first + 1;
 	return rp_count * UFS_BLOCK;
 }
+
+/* 1: the boot-args record (whose line need not apply) carries the safe-next-boot mark */
+static int record_safe(void)
+{
+	static struct bootrec_rec rec;
+	const char *why = 0;
+	uint64_t part = root_part(&why);
+	const volatile uint8_t *b = part >= BOOTREC_TAIL_BLOCKS * UFS_BLOCK ?
+				    rp_read(part - BOOTREC_TAIL_BLOCKS * UFS_BLOCK) : 0;
+
+	if (!b) {
+		return 0;
+	}
+	for (uint32_t i = 0; i < sizeof(rec); i++) {
+		((uint8_t *)&rec)[i] = b[i];
+	}
+	return bootrec_safe(&rec);
+}
 #endif
 
 #if XNU_DEFAULT
@@ -3432,6 +3535,12 @@ static int root_ok(void)
 		if (unread && tries < 2) {
 			dbg_delay_ms(500);
 		}
+	}
+	if (why && !unread && !log_on_screen) {
+		fail_screen(800);
+		out("root: ");
+		out(why);
+		out("; Android\n");
 	}
 	if (unread) {
 		fb_rect(0, 600, PANEL_W, 160, 0xff000000u);
@@ -3771,6 +3880,7 @@ void mtkloader_main(uint64_t dtb)
 		chain_android();
 	}
 	if (mark == MARK_RUNNING) {
+		fail_screen(0);
 		rescue_log();
 		dbg_delay_ms(5000);
 		chain_android();
@@ -3815,9 +3925,11 @@ void mtkloader_main(uint64_t dtb)
 	if (!boot_choice()) {
 		chain_android();
 	}
+#if !MAPPLE_RELEASE
 	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
 	fbc.x = 0;
 	fbc.y = fbc.top = 0;
+#endif
 	fbc.fg = 0xff40ff40u;
 	out(SOC_IS_MT6781 ? "== mtkloader: Darwin/XNU on realme 8i (MT6781) ==\n" :
 	    "== mtkloader: Darwin/XNU on X6826B (MT6768) ==\n");

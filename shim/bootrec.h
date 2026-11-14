@@ -14,11 +14,13 @@
 #define BOOTREC_VERSION        1
 #define BOOTREC_TAIL_BLOCKS    256u            /* last 1 MiB of 4 KiB blocks */
 #define BOOTREC_LINE           608             /* = boot_args.CommandLine */
+#define BOOTREC_SAFE           0x2u            /* the next boot is a safe boot (Mapple sets it, the kernel clears it
+						* once the GUI is up; mtkloader acts on it whether or not the line applies) */
 
 struct bootrec_rec {
 	char magic[8];
 	uint32_t version;
-	uint32_t flags;                         /* bit 0: enabled */
+	uint32_t flags;                         /* bit 0: the line enabled; bit 1: BOOTREC_SAFE */
 	uint64_t base_hash;                     /* FNV-1a 64 of the payload command line it replaces */
 	uint64_t seq;                           /* incremented on every write */
 	uint64_t line_hash;                     /* FNV-1a 64 of cmdline */
@@ -57,4 +59,19 @@ static inline int bootrec_valid(const struct bootrec_rec *rec, uint64_t base)
 	if (n == BOOTREC_LINE)
 		return 0;
 	return bootrec_hash(rec->cmdline, BOOTREC_LINE) == rec->line_hash;
+}
+
+/* 1 when rec is a whole record carrying BOOTREC_SAFE, whatever its line and payload */
+static inline int bootrec_safe(const struct bootrec_rec *rec)
+{
+	static const char want[8] = { 'M', 'A', 'P', 'P', 'L', 'E', 'B', 'R' };
+	unsigned n = 0;
+	for (int i = 0; i < 8; i++)
+		if (rec->magic[i] != want[i])
+			return 0;
+	if (rec->version != BOOTREC_VERSION || !(rec->flags & BOOTREC_SAFE))
+		return 0;
+	while (n < BOOTREC_LINE && rec->cmdline[n])
+		n++;
+	return n < BOOTREC_LINE && bootrec_hash(rec->cmdline, BOOTREC_LINE) == rec->line_hash;
 }

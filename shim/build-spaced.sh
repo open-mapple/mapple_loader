@@ -2,9 +2,10 @@
 # The shim for the realme 8i, as a raw arm64 Image for mtkloader (XNU_SHIM=1) to start: out/spaced/Image.
 # The boot-args record (bootrec.c) is read only from the partition mp_ufsroot= names, never from userdata.
 # CHECK_ABS=path/to/viva-check-abs.py checks that nothing needs an absolute address (the shim runs where it is put).
+# Arguments go to the compiler (-DMAPPLE_RELEASE=1: nothing on the screen unless the boot fails).
 set -euo pipefail
 cd "$(dirname "$0")"
-CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DMT6781_SHIM -DSPACED"
+CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DMT6781_SHIM -DSPACED $*"
 LLD=${LLD:-ld.lld}
 mkdir -p out/spaced
 OBJS=()

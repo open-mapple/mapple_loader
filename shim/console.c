@@ -14,6 +14,11 @@
 volatile uint32_t *con_fb = (volatile uint32_t *)FB_BASE;
 static uint32_t con_bg;
 static int row;
+#if defined(MAPPLE_RELEASE)
+static int con_quiet = 1;	/* a release build: nothing on the screen until con_clear() (a failure's screen) */
+#else
+static int con_quiet;
+#endif
 
 void con_clear(uint32_t bg)
 {
@@ -24,10 +29,13 @@ void con_clear(uint32_t bg)
 	}
 	con_bg = bg;
 	row = 0;
+	con_quiet = 0;
 }
 
 static void put_char(int col, char ch, uint32_t fg)
 {
+	if (con_quiet)
+		return;
 	if (ch < 0x20 || ch > 0x7e)
 		ch = '?';
 	const unsigned char *g = font8x16[ch - 0x20];

@@ -27,6 +27,14 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
 
 static const char *stage;	/* set at runtime: no absolute pointers in data */
 
+/* a failure: a release build has drawn nothing so far */
+static void fail_screen(void)
+{
+#if defined(MAPPLE_RELEASE)
+	con_clear(RED);
+#endif
+}
+
 static void __attribute__((noreturn)) halt(void)
 {
 	for (;;)
@@ -108,18 +116,22 @@ void shim_main(uint64_t dtb)
 	uint64_t fb = videolfb_base(dtb);
 	if (fb)
 		con_fb = (volatile uint32_t *)fb;
+#if !defined(MAPPLE_RELEASE)
 	con_clear(RED);
+#endif
 	con_str("SHIM", "Open Mapple: xnu loader");
 	con_hex2("EL", "el=", rsr("CurrentEL") >> 2, "wdt=", rd32(TOPRGU_WDT_MODE));
 	con_hex("DTB", dtb);
 	con_hex("LK FB", fb);
 	if (fb != FB_BASE) {
+		fail_screen();
 		con_str("STOP", "LK framebuffer moved; rebuild for it");
 		halt();
 	}
 	con_skip();
 
 	const char *why = loader_boot(dtb);
+	fail_screen();
 	con_str("LOADER", why);
 	halt();
 }

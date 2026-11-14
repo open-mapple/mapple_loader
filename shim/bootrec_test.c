@@ -34,6 +34,15 @@ int main(void)
 	r.magic[0] = 'X'; CHECK(!bootrec_valid(&r, r.base_hash)); r.magic[0] = 'M';
 	r.cmdline[5] = '\n'; r.line_hash = bootrec_hash(r.cmdline, BOOTREC_LINE); CHECK(!bootrec_valid(&r, r.base_hash));
 	memset(r.cmdline, 'a', BOOTREC_LINE); r.line_hash = bootrec_hash(r.cmdline, BOOTREC_LINE); CHECK(!bootrec_valid(&r, r.base_hash));
+	make(&r, base, want);
+	CHECK(!bootrec_safe(&r));
+	r.flags = 1 | BOOTREC_SAFE; CHECK(bootrec_safe(&r) && bootrec_valid(&r, r.base_hash));     /* the line still applies */
+	r.flags = BOOTREC_SAFE; CHECK(bootrec_safe(&r) && !bootrec_valid(&r, r.base_hash));        /* the mark without a line */
+	r.base_hash ^= 1; CHECK(bootrec_safe(&r)); r.base_hash ^= 1;                               /* whatever the payload */
+	r.cmdline[3] ^= 1; CHECK(!bootrec_safe(&r)); r.cmdline[3] ^= 1;                            /* torn */
+	r.version = 2; CHECK(!bootrec_safe(&r)); r.version = BOOTREC_VERSION;
+	r.magic[0] = 'X'; CHECK(!bootrec_safe(&r)); r.magic[0] = 'M';
+	memset(r.cmdline, 'a', BOOTREC_LINE); r.line_hash = bootrec_hash(r.cmdline, BOOTREC_LINE); CHECK(!bootrec_safe(&r));
 	CHECK(bootrec_hash("", 608) == 0xcbf29ce484222325ULL);
 	CHECK(bootrec_hash("a", 608) == 0xaf63dc4c8601ec8cULL);              /* FNV-1a 64 reference value */
 
