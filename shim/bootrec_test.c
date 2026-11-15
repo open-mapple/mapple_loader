@@ -32,6 +32,7 @@ int main(void)
 	r.flags = 0; CHECK(!bootrec_valid(&r, r.base_hash)); r.flags = 1;     /* disabled */
 	r.cmdline[3] ^= 1; CHECK(!bootrec_valid(&r, r.base_hash)); r.cmdline[3] ^= 1;   /* corrupted */
 	r.magic[0] = 'X'; CHECK(!bootrec_valid(&r, r.base_hash)); r.magic[0] = 'M';
+	memcpy(r.magic, "VIVA" "BOOT", 8); CHECK(!bootrec_valid(&r, r.base_hash)); memcpy(r.magic, BOOTREC_MAGIC, 8);   /* the old magic: no record */
 	r.cmdline[5] = '\n'; r.line_hash = bootrec_hash(r.cmdline, BOOTREC_LINE); CHECK(!bootrec_valid(&r, r.base_hash));
 	memset(r.cmdline, 'a', BOOTREC_LINE); r.line_hash = bootrec_hash(r.cmdline, BOOTREC_LINE); CHECK(!bootrec_valid(&r, r.base_hash));
 	make(&r, base, want);
