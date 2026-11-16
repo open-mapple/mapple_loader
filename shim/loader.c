@@ -101,6 +101,8 @@ static void zero64(uintptr_t dst, uint64_t n)
 		d[i] = 0;
 }
 
+static uint64_t cntpct(void) { uint64_t v; __asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(v)); return v; }
+
 static int magic_ok(const char *m)
 {
 	static const char want[] = "MAPPLEPL";
@@ -181,11 +183,23 @@ const char *loader_boot(uintptr_t dtb)
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
+	uint64_t t0 = cntpct();
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
 	uint32_t bootargs_len = 0;
 	uintptr_t bootargs = fdt_chosen_prop(dtb, "bootargs", &bootargs_len);
 	if (adt_phone_serial((volatile uint8_t *)adt_pa, p->adt_size, (const volatile char *)bootargs, bootargs_len))
 		con_hex2("SERIAL", "from=", 1, "lk=", 1);
+	uint8_t ent[48];
+	uint32_t ks_len = 0;
+	const volatile uint8_t *ks = (const volatile uint8_t *)fdt_chosen_prop(dtb, "kaslr-seed", &ks_len);
+	if (!ks || ks_len > 32)
+		ks_len = 0;
+	for (uint32_t i = 0; i < 32; i++)
+		ent[i] = i < ks_len ? ks[i] : 0;
+	uint64_t t[2] = { t0, cntpct() };
+	for (uint32_t i = 0; i < 16; i++)
+		ent[32 + i] = (uint8_t)(t[i / 8] >> (8 * (i % 8)));
+	con_hex2("SEED", "bytes=", adt_random_seed((volatile uint8_t *)adt_pa, p->adt_size, ent, sizeof(ent)), "lk=", ks_len);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 
