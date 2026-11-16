@@ -6,8 +6,8 @@
 #define SPLITMENU_H
 #include <stdint.h>
 
-#define MENU_SECS_DEFAULT   5u
-#define MENU_SECS_MIN       3u          /* a record cannot take the menu away: Android stays reachable */
+#define MENU_SECS_DEFAULT   15u
+#define MENU_SECS_MIN       15u         /* at least 15 s for a choice: a record cannot shorten it */
 #define MENU_SECS_MAX       30u
 
 /* NAME= at a word's start in a NUL-terminated line of at most max bytes: its value (up to a space) into v; 1 if found */

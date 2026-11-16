@@ -14,10 +14,14 @@ int main(void)
 	struct menu_key k = { 0 };
 	int seq[] = { 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1 }, got = 0;
 
-	xnu = 0, secs = 5;
-	strcpy(line, "a=1 mp_menu_default=ios mp_menu_secs=12 b");
+	xnu = 0, secs = MENU_SECS_DEFAULT;
+	assert(MENU_SECS_DEFAULT == 15 && MENU_SECS_MIN == 15);
+	strcpy(line, "a=1 mp_menu_default=ios mp_menu_secs=20 b");
 	menu_args(line, sizeof(line), &xnu, &secs, &pmic);
-	assert(xnu == 1 && secs == 12);
+	assert(xnu == 1 && secs == 20);
+	strcpy(line, "mp_menu_secs=12");
+	menu_args(line, sizeof(line), &xnu, &secs, &pmic);
+	assert(secs == 15);
 	strcpy(line, "mp_menu_default=android mp_menu_secs=0");
 	menu_args(line, sizeof(line), &xnu, &secs, &pmic);
 	assert(xnu == 0 && secs == MENU_SECS_MIN);
@@ -30,9 +34,9 @@ int main(void)
 	assert(xnu == 1);
 	menu_args(0, 0, &xnu, &secs, &pmic);
 	assert(pmic == 1);
-	strcpy(line, "mp_menu_pmic=0 mp_menu_secs=4");
+	strcpy(line, "mp_menu_pmic=0 mp_menu_secs=25");
 	menu_args(line, sizeof(line), &xnu, &secs, &pmic);
-	assert(pmic == 0 && secs == 4);
+	assert(pmic == 0 && secs == 25);
 	strcpy(line, "mp_menu_pmic=01");
 	menu_args(line, sizeof(line), &xnu, &secs, &pmic);
 	assert(pmic == 0);
