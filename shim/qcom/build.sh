@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 BOARD=${1:?usage: build.sh sweet|sunfish [compiler arguments]}
 shift
-CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-jump-tables -Wall -Wextra $*"
+CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-jump-tables -Wall -Wextra -I.. $*"
 case $BOARD in
 sweet) ;;
 sunfish) CFLAGS="$CFLAGS -DBOARD_SUNFISH" ;;
@@ -19,7 +19,7 @@ LLD=${LLD:-ld.lld}
 O=out/$BOARD
 mkdir -p "$O"
 OBJS=()
-for f in start.S shim.c console.c mmu.c fdt.c loader.c panel.c ufs.c strcmp.c; do
+for f in start.S shim.c console.c mmu.c fdt.c loader.c panel.c ufs.c strcmp.c ../identity.c; do
 	o=$O/$(basename "${f%.*}").o
 	clang $CFLAGS -c "$f" -o "$o"
 	OBJS+=("$o")
