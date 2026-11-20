@@ -116,6 +116,10 @@ const char *loader_boot(uintptr_t dtb)
 	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
 	uint64_t t0 = cntpct();
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
+	uint32_t bootargs_len = 0;
+	uintptr_t bootargs = fdt_chosen_prop(dtb, "bootargs", &bootargs_len);
+	if (adt_phone_serial((volatile uint8_t *)adt_pa, p->adt_size, (const volatile char *)bootargs, bootargs_len))
+		con_hex2("SERIAL", "from=", 1, "abl=", 1);
 	/* /chosen/random-seed, new at every boot: ABL's kaslr-seed and two timer readings, through SHA-256 */
 	uint8_t ent[48];
 	uint32_t ks_len = 0;
