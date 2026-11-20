@@ -3,6 +3,8 @@ Open Mapple: the boot loaders. MIT (LICENSE), except SplitBoot's boot menu (belo
 - mtk/loader/: mtkloader, from HakiOS (github.com/oosexgang/hakios-xnu-kernel). MIT, Copyright (c) 2025-2026
   the HakiOS authors.
 - shim/: viva's boot shim, from ios-viva (github.com/Nik300/ios-viva). MIT, Copyright (c) 2026 dipa-studio.
+- shim/qcom/: the Qualcomm shim, from ios-sweet (github.com/dipa-studio/ios-sweet) with the Pixel 4a's board
+  support from ios-sweet-pixel (github.com/hellagarage/ios-sweet-pixel). MIT, Copyright (c) 2026 dipa-studio.
 - mtk/loader/splitmenu.h and splitmenu_test.c: SplitBoot's boot menu. GPL-3.0-only, Copyright (c) 2026 Pritish
   Joshi (DrtSinX98); the full text is in LICENSES/GPL-3.0. mtkloader.bin built with SPLIT_MENU=1 (SplitBoot's
   loader) includes it and is therefore GPL-3.0; built without it, it is MIT.

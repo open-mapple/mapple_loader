@@ -1,57 +1,35 @@
 #!/bin/bash
-# Build the shim and wrap it in a boot.img v2 that mirrors the stock boot header.
-# BOARD=sweet (Redmi Note 10 Pro, default) or BOARD=sunfish (Pixel 4a).
+# The Qualcomm shim as a raw arm64 Image: build.sh BOARD [compiler arguments] -> out/BOARD/Image.
+# BOARD=sweet (Redmi Note 10 Pro) or BOARD=sunfish (Pixel 4a). mka packs it with the payload into the boot image
+# ABL starts (device.conf's bootimg_* keys); the stock DTB comes from the phone's own boot.img there.
+# CHECK_ABS=path/to/check-abs.py checks that nothing needs an absolute address (ABL puts the image anywhere).
+# clang, not ios-sweet's aarch64-linux-gnu-gcc (none on the Mac): -fno-jump-tables keeps its switch lookup tables, which
+# hold absolute addresses, out.
 set -euo pipefail
 cd "$(dirname "$0")"
-BOARD=${BOARD:-sweet}
-CC=aarch64-linux-gnu-gcc
-OBJCOPY=aarch64-linux-gnu-objcopy
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra"
+BOARD=${1:?usage: build.sh sweet|sunfish [compiler arguments]}
+shift
+CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-jump-tables -Wall -Wextra $*"
 case $BOARD in
-sweet)	DTB=../dtb/boot_unpacked/dtb; OSVER=17.0.0; OSPATCH=2035-06 ;;
-sunfish) CFLAGS="$CFLAGS -DBOARD_SUNFISH"; DTB=../dtb/sunfish/dtb; OSVER=13.0.0; OSPATCH=2023-08 ;;
-*)	echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
+sweet) ;;
+sunfish) CFLAGS="$CFLAGS -DBOARD_SUNFISH" ;;
+*) echo "unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
-mkdir -p out
-SRCS="start.S shim.c console.c mmu.c fdt.c loader.c panel.c ufs.c"
-for f in $SRCS; do
-	$CC $CFLAGS -c $f -o out/${f%.*}.o
+LLD=${LLD:-ld.lld}
+O=out/$BOARD
+mkdir -p "$O"
+OBJS=()
+for f in start.S shim.c console.c mmu.c fdt.c loader.c panel.c ufs.c strcmp.c; do
+	o=$O/$(basename "${f%.*}").o
+	clang $CFLAGS -c "$f" -o "$o"
+	OBJS+=("$o")
 done
-OBJS=$(for f in $SRCS; do echo out/${f%.*}.o; done)
-# The image runs wherever ABL puts it with no relocation pass: only the
-# header's image_size (start.o, linked at 0) may be an absolute address.
-abs=$(aarch64-linux-gnu-readelf -r $(echo $OBJS | sed 's#out/start.o##') | grep -c ABS64 || true)
-[ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
-$CC $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
-	$OBJS -o out/shim.elf
-$OBJCOPY -O binary out/shim.elf out/Image
+# The image runs wherever ABL puts it with no relocation pass: only the header's image_size (start.o, linked at 0)
+# may be an absolute address.
+[ -z "${CHECK_ABS:-}" ] || python3 "$CHECK_ABS" "${OBJS[@]:1}"
+$LLD -T shim.ld --build-id=none -N "${OBJS[@]}" -o "$O/shim.elf"
+$LLD -T shim.ld --build-id=none -N "${OBJS[@]}" --oformat=binary -o "$O/Image"
 # ABL copies the file; pad to image_size so .bss/stacks exist as zeroed bytes.
-size=$(aarch64-linux-gnu-nm out/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
-truncate -s "$size" out/Image
-# Ramdisk: an xnu payload (tools/mkpayload.py) if given as $1, else an empty
-# newc cpio (ABL dislikes a zero-size ramdisk on some builds) -> diagnostics.
-if [ -n "${1:-}" ]; then
-	cp "$1" out/ramdisk.bin
-else
-	(cd out && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
-fi
-KERNEL=out/Image
-if [ "$BOARD" = sunfish ]; then
-	# Google ABL rejects a raw Image ("Unsupported"): ship it as an LZ4 frame like stock.
-	lz4 -f -q -9 out/Image out/Image.lz4
-	KERNEL=out/Image.lz4
-fi
-mkbootimg --header_version 2 --kernel $KERNEL --ramdisk out/ramdisk.bin \
-	--dtb $DTB --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
-	--tags_offset 0x100 --dtb_offset 0x1f00000 --pagesize 4096 \
-	--os_version $OSVER --os_patch_level $OSPATCH \
-	--cmdline "console=null" -o out/shim-boot.img
-if [ "$BOARD" = sunfish ]; then
-	# Stock shape: 64 MiB boot partition with an unsigned AVB hash footer (AOSP external/avb).
-	python3 -I "${AVBTOOL:-$HOME/ios-pixel/src/avb/avbtool.py}" add_hash_footer --image out/shim-boot.img \
-		--partition_name boot --partition_size 67108864 --algorithm NONE \
-		--prop com.android.build.boot.os_version:13 --prop com.android.build.boot.security_patch:2023-08-05
-fi
-# Host render of the console layout.
-gcc -O1 -Wall $(echo "$CFLAGS" | grep -o -- '-DBOARD_[A-Z]*' || true) -o out/host_test console.c host_test.c && ./out/host_test
-ls -l out/Image out/shim-boot.img
+size=$(python3 -c "import struct; print(struct.unpack_from('<Q', open('$O/Image', 'rb').read(64), 16)[0])")
+python3 -c "f = open('$O/Image', 'r+b'); f.truncate($size)"
+ls -l "$O/Image"
